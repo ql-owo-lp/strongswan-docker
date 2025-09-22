@@ -1,0 +1,29 @@
+# Docker Compose file version
+version: "3.9"
+
+services:
+  # Define the strongswan service
+  strongswan:
+    # Use the custom-built image named 'mystrongswan' with the 'latest' tag.
+    # Make sure you have built this image locally first using 'docker build'.
+    image: iowoi/strongswan:latest
+    container_name: ipsec-gateway
+    
+    # Always restart the container if it stops, for high availability.
+    restart: always
+    
+    # Mount the configuration files from the host NAS into the container.
+    # The strongswan installation inside the Alpine container expects these files in /etc/.
+    volumes:
+      - ./ipsec.conf:/etc/ipsec.conf
+      - ./ipsec.secrets:/etc/ipsec.secrets
+      
+    # Grant the container extended privileges to modify host network settings.
+    # NET_ADMIN is required for creating VPN tunnels and managing routing.
+    cap_add:
+      - NET_ADMIN
+      
+    # Use the host's network stack directly. This is the simplest and most
+    # effective way for a VPN gateway container to function, as it avoids
+    # complex port mapping and network address translation (NAT) issues.
+    network_mode: "host"
