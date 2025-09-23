@@ -10,7 +10,7 @@ set -e
 # The name of the final image, including your Docker Hub username.
 readonly IMAGE_NAME="iowoi/strongswan"
 # The target architectures for the build.
-readonly PLATFORMS="linux/amd64,linux/arm64"
+readonly PLATFORMS="linux/amd64,linux/arm64,linux/arm/v7"
 # The directory containing the Dockerfile and entrypoint.sh script.
 readonly BUILD_CONTEXT="docker"
 

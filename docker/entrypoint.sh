@@ -16,17 +16,21 @@ echo "Starting strongSwan daemon in the background..."
 # The debug levels are controlled by /etc/strongswan.conf, not command-line flags.
 ipsec start
 
-# Give the daemon a moment to initialize before sending commands
-sleep 2
+# Wait a moment for the daemon to initialize
+sleep 5
 
 # Find all connection names from the config file (lines starting with "conn")
 # and handle potential leading whitespace.
-CONN_NAMES=$(grep -E '^\s*conn\s+' /etc/ipsec.conf | awk '{print $2}')
+CONN_NAMES=$(grep -E '^\s*conn\s+' /etc/ipsec.conf | grep -v '%default' | awk '{print $2}')
 
 if [ -z "$CONN_NAMES" ]; then
   echo "Warning: No connections found in /etc/ipsec.conf to automatically start."
 else
-  echo "Found connections to automatically start: $CONN_NAMES"
+  echo "Found connections to automatically start:"
+  for conn in $CONN_NAMES; do
+    echo "- $conn"
+  done
+  echo
   for conn in $CONN_NAMES; do
     echo "--> Attempting to bring up tunnel: $conn"
     # Execute 'ipsec up' for each connection found
