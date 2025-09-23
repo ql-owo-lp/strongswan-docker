@@ -39,7 +39,6 @@ else
 fi
 
 echo "Initialization complete. Container is running and will stay alive."
-echo "Use 'docker logs -f ipsec-gateway' to monitor."
 
 # This is a common pattern to keep a container running.
 # The `wait` command pauses the script here.
