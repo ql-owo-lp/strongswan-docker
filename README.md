@@ -44,13 +44,18 @@ These variables can be set in the `docker-compose.yml` file.
     -   Create an `ipsec.conf` file with your VPN connection details.
     -   Create an `ipsec.secrets` file with your credentials.
 
-3.  **Build the image:**
-    ```bash
-    ./build-docker.sh
-    ```
-    This will build the multi-arch image and push it to Docker Hub under the name `iowoi/strongswan`.
+3.  **Build the Image (Optional):**
 
-4.  **Run the container:**
+    This repository is configured with a GitHub Action to automatically build and publish the Docker image to `ghcr.io`. However, if you want to build the image manually, you can use the provided script:
+    ```bash
+    # Build and push to ghcr.io
+    ./build-docker.sh ghcr.io/your-username/your-repo
+
+    # Build and push to Docker Hub
+    ./build-docker.sh your-dockerhub-username/your-repo
+    ```
+
+4.  **Run the Container:**
     Use `docker-compose.yml` to run the container. Make sure your `ipsec.conf` and `ipsec.secrets` are in the same directory.
     ```bash
     docker-compose up -d
