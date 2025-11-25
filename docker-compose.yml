@@ -27,3 +27,11 @@ services:
     # effective way for a VPN gateway container to function, as it avoids
     # complex port mapping and network address translation (NAT) issues.
     network_mode: "host"
+
+    # Pass environment variables to the container to configure the network settings.
+    # These variables are used by the entrypoint.sh script to set up iptables.
+    # Update these values to match your specific network environment.
+    environment:
+      - LOCAL_NET=192.168.0.0/16
+      - VPN_SUBNET=10.10.0.0/24
+      - OUT_INTERFACE=eth0
