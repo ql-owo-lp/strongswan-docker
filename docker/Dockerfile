@@ -1,5 +1,5 @@
 # Use a recent, specific version of Alpine for stability
-FROM alpine:3.20
+FROM alpine
 
 # Install strongSwan and basic network tools.
 RUN apk update && \
