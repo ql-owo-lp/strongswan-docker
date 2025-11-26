@@ -29,8 +29,21 @@ You can configure the network settings by passing environment variables to the c
 -   `LOCAL_NET`: The CIDR of your local network (default: `192.168.0.0/16`).
 -   `VPN_SUBNET`: The virtual IP subnet for VPN clients (default: `10.10.0.0/24`).
 -   `OUT_INTERFACE`: The primary network interface of your NAS/server. This is now optional and will be auto-detected if not provided.
+-   `IPTABLES_CHAIN_PREFIX`: A custom prefix for the `iptables` chains created by the container (default: `STRONGSWAN`). This allows you to run multiple instances of the container without their firewall rules conflicting.
 
 These variables can be set in the `docker-compose.yml` file.
+
+## Testing
+
+This repository includes an end-to-end (e2e) test suite to verify the correctness of the `iptables` rule management. The tests ensure that the firewall rules are created, cleaned up, and managed correctly, even in cases of unclean shutdown.
+
+To run the tests, execute the following script from the root of the repository:
+
+```bash
+sudo ./test/e2e_iptables.sh
+```
+
+**Note**: The test script requires `sudo` because it needs to interact with `iptables` and run Docker containers. It will build a temporary Docker image for testing and clean up all resources (containers, images, and `iptables` rules) it creates.
 
 ## Usage
 
