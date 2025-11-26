@@ -1,5 +1,5 @@
-# Use a recent, specific version of Alpine for stability
-FROM alpine
+# Use a recent, specific version of Alpine for stability from a public mirror to avoid rate limits
+FROM public.ecr.aws/docker/library/alpine:3.15
 
 # Install strongSwan and basic network tools.
 RUN apk update && \
