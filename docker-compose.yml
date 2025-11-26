@@ -18,10 +18,11 @@ services:
       - ./ipsec.conf:/etc/ipsec.conf
       - ./ipsec.secrets:/etc/ipsec.secrets
       
-    # Grant the container extended privileges to modify host network settings.
-    # NET_ADMIN is required for creating VPN tunnels and managing routing.
-    cap_add:
-      - NET_ADMIN
+    # Grant the container full access to the host's devices and processes.
+    # This is a significant security risk, but is required on some systems
+    # where granular capabilities (like SYS_ADMIN) are not sufficient to
+    # modify host kernel parameters like net.ipv4.ip_forward.
+    privileged: true
       
     # Use the host's network stack directly. This is the simplest and most
     # effective way for a VPN gateway container to function, as it avoids
