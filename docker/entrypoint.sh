@@ -57,10 +57,6 @@ remove_firewall_rules() {
   echo "Firewall rules removed."
 }
 
-# Enable IP forwarding. This is essential for the container to act as a router.
-echo "Enabling IP forwarding..."
-sysctl -w net.ipv4.ip_forward=1 > /dev/null
-
 # Add the firewall rules at startup.
 add_firewall_rules
 # --- End of Network Configuration ---
