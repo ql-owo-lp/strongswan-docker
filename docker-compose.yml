@@ -4,9 +4,9 @@ version: "3.9"
 services:
   # Define the strongswan service
   strongswan:
-    # Use the custom-built image named 'mystrongswan' with the 'latest' tag.
-    # Make sure you have built this image locally first using 'docker build'.
-    image: iowoi/strongswan:latest
+    # This image is published to the GitHub Container Registry (ghcr.io).
+    # You can also build it locally using the 'build-docker.sh' script.
+    image: ghcr.io/ql-owo-lp/strongswan-docker:latest
     container_name: ipsec-gateway
     
     # Always restart the container if it stops, for high availability.
