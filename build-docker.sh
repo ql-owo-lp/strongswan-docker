@@ -40,20 +40,33 @@ else
     docker buildx use multiarchbuilder
 fi
 
-echo "--- Building and Pushing Multi-arch Image: ${IMAGE_NAME} ---"
-echo "Target platforms: ${PLATFORMS}"
-
-# The 'buildx build' command builds for all specified platforms and pushes the
-# manifest list (which points to the platform-specific images) to the registry.
-# The '--push' flag is essential for creating a usable multi-arch image on Docker Hub.
-docker buildx build \
-    --platform "${PLATFORMS}" \
-    --tag "${IMAGE_NAME}:latest" \
-    --push \
-    "${BUILD_CONTEXT}"
-
-echo
-echo "--- Build and Push Complete! ---"
-echo "Multi-arch image '${IMAGE_NAME}:latest' is now available on Docker Hub."
-echo "You can inspect it with the command:"
-echo "  docker buildx imagetools inspect ${IMAGE_NAME}:latest"
+# --- Build Logic ---
+# Check if running in E2E test mode to avoid multi-arch builds and pushing to a registry.
+if [ "$E2E_TESTING" = "true" ]; then
+    echo "--- Building Single-arch Image for E2E Test: ${IMAGE_NAME} ---"
+    # For local tests, we build for the host architecture and load it into the local daemon.
+    # This is faster and avoids Docker Hub rate limits.
+    docker buildx build \
+        --platform "linux/amd64" \
+        --tag "${IMAGE_NAME}:latest" \
+        --load \
+        "${BUILD_CONTEXT}"
+    echo
+    echo "--- E2E Test Build Complete! ---"
+    echo "Single-arch image '${IMAGE_NAME}:latest' is now loaded into the local Docker daemon."
+else
+    echo "--- Building and Pushing Multi-arch Image: ${IMAGE_NAME} ---"
+    echo "Target platforms: ${PLATFORMS}"
+    # The 'buildx build' command builds for all specified platforms and pushes the
+    # manifest list (which points to the platform-specific images) to the registry.
+    docker buildx build \
+        --platform "${PLATFORMS}" \
+        --tag "${IMAGE_NAME}:latest" \
+        --push \
+        "${BUILD_CONTEXT}"
+    echo
+    echo "--- Build and Push Complete! ---"
+    echo "Multi-arch image '${IMAGE_NAME}:latest' is now available on Docker Hub."
+    echo "You can inspect it with the command:"
+    echo "  docker buildx imagetools inspect ${IMAGE_NAME}:latest"
+fi
