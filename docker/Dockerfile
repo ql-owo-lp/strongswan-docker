@@ -6,7 +6,8 @@ RUN apk update && \
     apk add --no-cache \
         strongswan \
         bash \
-        iproute2 && \
+        iproute2 \
+        iptables && \
     rm -rf /var/cache/apk/*
 
 # Copy the strongSwan daemon configuration into the image
