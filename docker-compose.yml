@@ -22,6 +22,11 @@ services:
     # NET_ADMIN is required for creating VPN tunnels and managing routing.
     cap_add:
       - NET_ADMIN
+
+    # Allow the container to modify kernel parameters. This is necessary for
+    # enabling IP forwarding, which is a requirement for a VPN gateway.
+    sysctls:
+      - net.ipv4.ip_forward=1
       
     # Use the host's network stack directly. This is the simplest and most
     # effective way for a VPN gateway container to function, as it avoids
