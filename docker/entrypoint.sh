@@ -21,9 +21,11 @@ else
   echo "Using provided OUT_INTERFACE: ${OUT_INTERFACE}"
 fi
 
-# Define custom chain names
-NAT_CHAIN="STRONGSWAN_NAT"
-FORWARD_CHAIN="STRONGSWAN_FORWARD"
+# Define custom chain names, allowing for a user-specified prefix
+# to run multiple instances without rule conflicts.
+IPTABLES_CHAIN_PREFIX="${IPTABLES_CHAIN_PREFIX:-STRONGSWAN}"
+NAT_CHAIN="${IPTABLES_CHAIN_PREFIX}_NAT"
+FORWARD_CHAIN="${IPTABLES_CHAIN_PREFIX}_FORWARD"
 
 cleanup_firewall_rules() {
   echo "Cleaning up existing firewall rules..."
