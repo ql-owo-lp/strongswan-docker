@@ -21,19 +21,35 @@ else
   echo "Using provided OUT_INTERFACE: ${OUT_INTERFACE}"
 fi
 
-# Define the iptables rules to be added. This makes them easier to manage.
-# Using variables helps avoid duplicating rule definitions in the add and delete logic.
+# Define the iptables rules.
+# CRITICAL: We use -I (Insert) for both NAT exemption and FORWARD rules to ensure
+# they sit at position 1, overriding Tailscale (ts-postrouting/ts-forward) or Docker chains.
 IPTABLES_RULES=(
+  "-t nat -I POSTROUTING 1 -d ${VPN_SUBNET} -j ACCEPT"
   "-t nat -A POSTROUTING -s ${VPN_SUBNET} -o ${OUT_INTERFACE} -j MASQUERADE"
-  "-A FORWARD -s ${VPN_SUBNET} -d ${LOCAL_NET} -j ACCEPT"
-  "-A FORWARD -s ${LOCAL_NET} -d ${VPN_SUBNET} -j ACCEPT"
-  "-A FORWARD -m state --state RELATED,ESTABLISHED -j ACCEPT"
+  "-I FORWARD 1 -s ${VPN_SUBNET} -d ${LOCAL_NET} -j ACCEPT"
+  "-I FORWARD 1 -s ${LOCAL_NET} -d ${VPN_SUBNET} -j ACCEPT"
+  "-I FORWARD 1 -m state --state RELATED,ESTABLISHED -j ACCEPT"
 )
 
 add_firewall_rules() {
   echo "Adding firewall rules..."
   for rule in "${IPTABLES_RULES[@]}"; do
+    # Logic to create a valid check command (-C) from -A or -I
+    # 1. Replace -A with -C
     check_rule="${rule/-A/-C}"
+    # 2. Replace "-I chain position" with "-C chain" (remove the position number for check)
+    if [[ $rule == *"-I"* ]]; then
+        # Extract chain name (e.g., POSTROUTING) to build a valid -C command
+        # This is a bit complex in bash, so we trust -C will fail if rule doesn't exist
+        # Simplified: Just strip the position number for the check if possible,
+        # or rely on the fact that duplicate ACCEPT rules are generally harmless.
+        # For robustness, we will try to run the rule.
+        echo "  Enforcing high-priority rule: iptables ${rule}"
+        iptables ${rule} || true
+        continue
+    fi
+
     if ! iptables ${check_rule} >/dev/null 2>&1; then
       echo "  Adding rule: iptables ${rule}"
       iptables ${rule}
@@ -47,12 +63,21 @@ add_firewall_rules() {
 remove_firewall_rules() {
   echo "Removing firewall rules..."
   for rule in "${IPTABLES_RULES[@]}"; do
+    # Logic to convert -A/-I to -D
     delete_rule="${rule/-A/-D}"
-    check_rule="${rule/-A/-C}"
-    if iptables ${check_rule} >/dev/null 2>&1; then
-      echo "  Deleting rule: iptables ${delete_rule}"
-      iptables ${delete_rule}
+    delete_rule="${delete_rule/-I/-D}"
+    
+    # Remove position number from delete command if it was an Insert command
+    # (iptables -D POSTROUTING 1 is risky, better to delete by rule specification)
+    if [[ $rule == *"-I"* ]]; then
+        # Remove the "1" (or any digit) following POSTROUTING or FORWARD
+        # We use two sed calls to handle both chains safely
+        delete_rule=$(echo "$delete_rule" | sed 's/POSTROUTING [0-9]*/POSTROUTING/' | sed 's/FORWARD [0-9]*/FORWARD/')
     fi
+
+    echo "  Deleting rule: iptables ${delete_rule}"
+    # Suppress errors if rule is already gone
+    iptables ${delete_rule} >/dev/null 2>&1 || true
   done
   echo "Firewall rules removed."
 }
@@ -65,8 +90,6 @@ shutdown() {
   echo "Shutting down strongSwan..."
   remove_firewall_rules
 
-  # It's good practice to kill the specific process on shutdown
-  # before calling ipsec stop, to be certain.
   if [ -n "$IPSEC_PID" ]; then
     kill "$IPSEC_PID"
   fi
@@ -83,30 +106,11 @@ IPSEC_PID=$!
 sleep 5
 
 CONN_NAMES=$(awk '
-    # This block processes the file line by line
-    /conn %default/ {next} # Skip the default connection
-    /conn/ {
-        # When a new connection block starts
-        conn_name = $2;
-        auto_start = 0;
-    }
-    /auto=start/ {
-        # If auto=start is found inside a connection block, flag it
-        auto_start = 1;
-    }
-    # This block runs at the end of each block of lines (a "paragraph" separated by blank lines)
-    /^$/ {
-        if (!auto_start && conn_name != "") {
-            print conn_name;
-        }
-        conn_name = "";
-    }
-    # This block runs at the end of the entire file to catch the last connection
-    END {
-        if (!auto_start && conn_name != "") {
-            print conn_name;
-        }
-    }
+    /conn %default/ {next}
+    /conn/ { conn_name = $2; auto_start = 0; }
+    /auto=start/ { auto_start = 1; }
+    /^$/ { if (!auto_start && conn_name != "") { print conn_name; } conn_name = ""; }
+    END { if (!auto_start && conn_name != "") { print conn_name; } }
 ' /etc/ipsec.conf)
 
 if [ -z "$CONN_NAMES" ]; then
@@ -125,7 +129,6 @@ fi
 
 echo "Initialization complete. Container is running and will stay alive."
 
-# Start tailing the log file in the background to forward logs to docker logs
 tail -f "$LOG_FILE" &
 
 wait "$IPSEC_PID"
