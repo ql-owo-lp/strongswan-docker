@@ -1,8 +1,6 @@
 #!/bin/bash
 set -e
 
-LOG_FILE="/var/log/strongswan.log"
-
 # --- Network Configuration ---
 # Set sane defaults for network variables, but allow them to be overridden by environment variables.
 LOCAL_NET="${LOCAL_NET:-192.168.0.0/16}"
@@ -21,90 +19,91 @@ else
   echo "Using provided OUT_INTERFACE: ${OUT_INTERFACE}"
 fi
 
-# Define the iptables rules.
-# CRITICAL: We use -I (Insert) for both NAT exemption and FORWARD rules to ensure
-# they sit at position 1, overriding Tailscale (ts-postrouting/ts-forward) or Docker chains.
-IPTABLES_RULES=(
-  "-t nat -I POSTROUTING 1 -d ${VPN_SUBNET} -j ACCEPT"
-  "-t nat -A POSTROUTING -s ${VPN_SUBNET} -o ${OUT_INTERFACE} -j MASQUERADE"
-  "-I FORWARD 1 -s ${VPN_SUBNET} -d ${LOCAL_NET} -j ACCEPT"
-  "-I FORWARD 1 -s ${LOCAL_NET} -d ${VPN_SUBNET} -j ACCEPT"
-  "-I FORWARD 1 -m state --state RELATED,ESTABLISHED -j ACCEPT"
-)
+# Define custom chain names, allowing for a user-specified prefix
+# to run multiple instances without rule conflicts.
+IPTABLES_CHAIN_PREFIX="${IPTABLES_CHAIN_PREFIX:-STRONGSWAN}"
+NAT_CHAIN="${IPTABLES_CHAIN_PREFIX}_NAT"
+FORWARD_CHAIN="${IPTABLES_CHAIN_PREFIX}_FORWARD"
+
+cleanup_firewall_rules() {
+  echo "Cleaning up existing firewall rules..."
+
+  # Remove jump rule from POSTROUTING if it exists
+  if iptables -t nat -C POSTROUTING -j ${NAT_CHAIN} >/dev/null 2>&1; then
+    iptables -t nat -D POSTROUTING -j ${NAT_CHAIN}
+  fi
+
+  # Remove jump rule from FORWARD if it exists
+  if iptables -C FORWARD -j ${FORWARD_CHAIN} >/dev/null 2>&1; then
+    iptables -D FORWARD -j ${FORWARD_CHAIN}
+  fi
+
+  # Flush and delete the custom NAT chain if it exists
+  if iptables -t nat -L ${NAT_CHAIN} >/dev/null 2>&1; then
+    iptables -t nat -F ${NAT_CHAIN}
+    iptables -t nat -X ${NAT_CHAIN}
+  fi
+
+  # Flush and delete the custom FORWARD chain if it exists
+  if iptables -L ${FORWARD_CHAIN} >/dev/null 2>&1; then
+    iptables -F ${FORWARD_CHAIN}
+    iptables -X ${FORWARD_CHAIN}
+  fi
+
+  echo "Firewall cleanup complete."
+}
 
 add_firewall_rules() {
-  echo "Adding firewall rules..."
-  for rule in "${IPTABLES_RULES[@]}"; do
-    # Logic to create a valid check command (-C) from -A or -I
-    # 1. Replace -A with -C
-    check_rule="${rule/-A/-C}"
-    # 2. Replace "-I chain position" with "-C chain" (remove the position number for check)
-    if [[ $rule == *"-I"* ]]; then
-        # Extract chain name (e.g., POSTROUTING) to build a valid -C command
-        # This is a bit complex in bash, so we trust -C will fail if rule doesn't exist
-        # Simplified: Just strip the position number for the check if possible,
-        # or rely on the fact that duplicate ACCEPT rules are generally harmless.
-        # For robustness, we will try to run the rule.
-        echo "  Enforcing high-priority rule: iptables ${rule}"
-        iptables ${rule} || true
-        continue
-    fi
+  # Clean up any old rules first to ensure a fresh start
+  cleanup_firewall_rules
 
-    if ! iptables ${check_rule} >/dev/null 2>&1; then
-      echo "  Adding rule: iptables ${rule}"
-      iptables ${rule}
-    else
-      echo "  Rule already exists: iptables ${rule}"
-    fi
-  done
+  echo "Adding firewall rules..."
+
+  # Create the custom chains
+  iptables -t nat -N ${NAT_CHAIN}
+  iptables -N ${FORWARD_CHAIN}
+
+  # Add rules to the custom chains
+  iptables -t nat -A ${NAT_CHAIN} -d ${VPN_SUBNET} -j ACCEPT
+  iptables -t nat -A ${NAT_CHAIN} -s ${VPN_SUBNET} -o ${OUT_INTERFACE} -j MASQUERADE
+
+  iptables -A ${FORWARD_CHAIN} -s ${VPN_SUBNET} -d ${LOCAL_NET} -j ACCEPT
+  iptables -A ${FORWARD_CHAIN} -s ${LOCAL_NET} -d ${VPN_SUBNET} -j ACCEPT
+  iptables -A ${FORWARD_CHAIN} -m state --state RELATED,ESTABLISHED -j ACCEPT
+
+  # Add jump rules to the main chains
+  iptables -t nat -I POSTROUTING 1 -j ${NAT_CHAIN}
+  iptables -I FORWARD 1 -j ${FORWARD_CHAIN}
+
   echo "Firewall rules applied."
 }
 
-remove_firewall_rules() {
-  echo "Removing firewall rules..."
-  for rule in "${IPTABLES_RULES[@]}"; do
-    # Logic to convert -A/-I to -D
-    delete_rule="${rule/-A/-D}"
-    delete_rule="${delete_rule/-I/-D}"
-    
-    # Remove position number from delete command if it was an Insert command
-    # (iptables -D POSTROUTING 1 is risky, better to delete by rule specification)
-    if [[ $rule == *"-I"* ]]; then
-        # Remove the "1" (or any digit) following POSTROUTING or FORWARD
-        # We use two sed calls to handle both chains safely
-        delete_rule=$(echo "$delete_rule" | sed 's/POSTROUTING [0-9]*/POSTROUTING/' | sed 's/FORWARD [0-9]*/FORWARD/')
-    fi
+# --- Main Execution ---
 
-    echo "  Deleting rule: iptables ${delete_rule}"
-    # Suppress errors if rule is already gone
-    iptables ${delete_rule} >/dev/null 2>&1 || true
-  done
-  echo "Firewall rules removed."
-}
-
-# Add the firewall rules at startup.
-add_firewall_rules
-# --- End of Network Configuration ---
-
+# Setup graceful shutdown
+IPSEC_PID=""
 shutdown() {
   echo "Shutting down strongSwan..."
-  remove_firewall_rules
-
+  cleanup_firewall_rules
   if [ -n "$IPSEC_PID" ]; then
     kill "$IPSEC_PID"
   fi
-  ipsec stop >> "$LOG_FILE" 2>&1
-  exit 0
+  echo "Shutdown complete."
 }
-
 trap 'shutdown' TERM INT
 
-echo "Starting strongSwan daemon in the background..."
-ipsec start --nofork > "$LOG_FILE" 2>&1 &
+# Add firewall rules at startup
+add_firewall_rules
+
+# Start the strongSwan daemon in the background
+echo "Starting strongSwan..."
+ipsec start --nofork &
 IPSEC_PID=$!
 
-sleep 5
+# Wait a moment for the daemon to initialize
+sleep 2
 
+# Bring up VPN connections that are not set to auto=start
 CONN_NAMES=$(awk '
     /conn %default/ {next}
     /conn/ { conn_name = $2; auto_start = 0; }
@@ -127,8 +126,8 @@ else
   done
 fi
 
-echo "Initialization complete. Container is running and will stay alive."
+echo "Initialization complete. Waiting for shutdown signal..."
 
-tail -f "$LOG_FILE" &
-
+# Wait for the strongSwan process to exit.
+# This keeps the container alive and allows the trap to catch signals.
 wait "$IPSEC_PID"
