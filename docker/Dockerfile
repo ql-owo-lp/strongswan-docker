@@ -5,7 +5,7 @@
 ARG IPTABLES_MODE=legacy
 ARG ALPINE_VERSION=3.15
 # Choose the Alpine version based on the selected iptables mode
-FROM public.ecr.aws/docker/library/alpine:${ALPINE_VERSION}
+FROM mirror.gcr.io/library/alpine:${ALPINE_VERSION}
 
 # --- Package Installation ---
 # Install strongSwan and essential network tools. The specific packages

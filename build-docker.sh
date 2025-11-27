@@ -59,6 +59,7 @@ docker buildx build \
     --build-arg ALPINE_VERSION=3.19 \
     --platform "${PLATFORMS}" \
     --tag "${IMAGE_NAME}:nft" \
+    --tag "${IMAGE_NAME}:latest" \
     --push \
     "${BUILD_CONTEXT}"
 
