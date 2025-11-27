@@ -1,7 +1,15 @@
-# Use a recent, specific version of Alpine for stability from a public mirror to avoid rate limits
-FROM public.ecr.aws/docker/library/alpine:3.15
+# --- Build Configuration ---
+# Accept a build argument to switch between iptables modes.
+# - 'legacy': Uses Alpine 3.15, which has the older iptables.
+# - 'nft':    Uses Alpine 3.19, which has iptables-nft.
+ARG IPTABLES_MODE=legacy
+ARG ALPINE_VERSION=3.15
+# Choose the Alpine version based on the selected iptables mode
+FROM mirror.gcr.io/library/alpine:${ALPINE_VERSION}
 
-# Install strongSwan and basic network tools.
+# --- Package Installation ---
+# Install strongSwan and essential network tools. The specific packages
+# will be installed based on the Alpine version.
 RUN apk update && \
     apk add --no-cache \
         strongswan \
@@ -10,12 +18,15 @@ RUN apk update && \
         iptables && \
     rm -rf /var/cache/apk/*
 
-# Copy the strongSwan daemon configuration into the image
+# --- Configuration ---
+# Copy the strongSwan daemon configuration into the image.
 COPY strongswan.conf /etc/strongswan.conf
 
-# Copy the entrypoint script into the image and make it executable
+# Copy the entrypoint script, which manages the container's startup
+# and shutdown procedures, and make it executable.
 COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 
-# This is the command that will run when the container starts
+# --- Execution ---
+# Define the entrypoint that will be executed when the container starts.
 ENTRYPOINT ["/entrypoint.sh"]
