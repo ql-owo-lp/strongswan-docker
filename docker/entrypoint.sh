@@ -1,6 +1,15 @@
 #!/bin/bash
 set -e
 
+# --- Diagnostic Logging ---
+echo "--- Initializing strongSwan Container ---"
+echo "Detecting iptables version..."
+# Log the path to the iptables executable
+echo "iptables binary: $(which iptables)"
+# Log the version of iptables, which indicates if it's legacy or nft
+iptables --version
+echo "-----------------------------------------"
+
 LOG_FILE="/var/log/strongswan.log"
 
 # --- Network Configuration ---

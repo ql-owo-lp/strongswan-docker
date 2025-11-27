@@ -78,7 +78,20 @@ If you are building the image manually, the `build-docker.sh` script will automa
 
 ## Troubleshooting
 
--   **Connectivity issues**: Double-check the `LOCAL_NET`, `VPN_SUBNET`, and `OUT_INTERFACE` variables in `docker/entrypoint.sh`.
--   **Logs**: Check the container logs for connection errors: `docker logs ipsec-gateway`.
+-   **Firewall rules not appearing on the host:** If the container logs indicate that `iptables` rules are being created but they do not appear on your host system (e.g., `iptables -L`), it is almost certainly due to an `iptables` version mismatch.
+    1.  Check the container logs: `docker logs ipsec-gateway`.
+    2.  At the top of the logs, you will see the `iptables` version information from the container. For example:
+        ```
+        iptables v1.8.9 (legacy)
+        ```
+        or
+        ```
+        iptables v1.8.10 (nf_tables)
+        ```
+    3.  On your host system, run `iptables --version` to see which version your host is using.
+    4.  Ensure that the `iptables` version in the container matches the version on your host. If they do not match, you must use the image tag that corresponds to your host's `iptables` version (`:legacy` or `:nft`).
+
+-   **Connectivity issues**: Double-check the `LOCAL_NET`, `VPN_SUBNET`, and `OUT_INTERFACE` variables in your `docker-compose.yml` file.
+-   **Logs**: Check the container logs for any other connection errors: `docker logs ipsec-gateway`.
 
 This updated configuration should resolve issues where the VPN connects but traffic is not routed correctly.
