@@ -18,19 +18,23 @@ services:
       - ./ipsec.conf:/etc/ipsec.conf
       - ./ipsec.secrets:/etc/ipsec.secrets
       
-    # Grant the container extended privileges to modify host network settings.
-    # NET_ADMIN is required for creating VPN tunnels and managing routing.
+    # --- Critical Permissions ---
+    # CAP_NET_ADMIN: Required to modify network configurations, specifically
+    # for creating VPN tunnels and managing firewall rules (iptables).
+    # Without this, the container cannot apply its firewall rules to the host.
     cap_add:
       - NET_ADMIN
 
-    # Allow the container to modify kernel parameters. This is necessary for
-    # enabling IP forwarding, which is a requirement for a VPN gateway.
+    # --- Host Configuration ---
+    # This setting is crucial for enabling IP forwarding on the host system,
+    # allowing traffic to be routed correctly through the VPN.
     sysctls:
       - net.ipv4.ip_forward=1
       
-    # Use the host's network stack directly. This is the simplest and most
-    # effective way for a VPN gateway container to function, as it avoids
-    # complex port mapping and network address translation (NAT) issues.
+    # network_mode: "host": This is the most critical setting. It makes the
+    # container share the host's network namespace. This means the iptables
+    # commands run inside the container will directly affect the host's
+    # firewall, which is necessary for the VPN to function.
     network_mode: "host"
 
     # Pass environment variables to the container to configure the network settings.
