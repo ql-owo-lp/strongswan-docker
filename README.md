@@ -20,6 +20,8 @@ The `entrypoint.sh` script performs the following actions on startup:
 3.  **Starts strongSwan**: It launches the `ipsec` daemon to handle the VPN connections.
 4.  **Brings Up Tunnels**: It automatically brings up any connections in `ipsec.conf` that are not marked with `auto=start`.
 
+**Important:** For the container to be able to modify the host's firewall rules, it is essential that it is run with `network_mode: "host"`, as configured in the `docker-compose.yml` file.
+
 ### Networking Configuration
 
 The `entrypoint.sh` script is responsible for configuring the necessary networking rules on the host. It does this in a non-destructive way by adding and removing its specific `iptables` rules, ensuring it does not interfere with other firewall configurations.
@@ -60,6 +62,19 @@ These variables can be set in the `docker-compose.yml` file.
     ```bash
     docker-compose up -d
     ```
+
+### A Note on `iptables` Compatibility
+
+Modern Linux distributions are transitioning from the original `iptables` to a newer version based on the `nftables` kernel framework. The version of `iptables` in the container must match the version used by the host OS for the firewall rules to be applied correctly.
+
+This repository now builds two versions of the Docker image to ensure compatibility:
+
+-   `:legacy`: Based on Alpine 3.15, for hosts that still use the original `iptables`.
+-   `:nft`: Based on Alpine 3.19, for hosts that have transitioned to `iptables-nft`.
+
+If you are using the pre-built images, make sure to choose the correct tag for your host system in the `docker-compose.yml` file.
+
+If you are building the image manually, the `build-docker.sh` script will automatically build both versions and tag them with `:legacy` and `:nft`.
 
 ## Troubleshooting
 
