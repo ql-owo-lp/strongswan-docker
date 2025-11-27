@@ -20,6 +20,8 @@ The `entrypoint.sh` script performs the following actions on startup:
 3.  **Starts strongSwan**: It launches the `ipsec` daemon to handle the VPN connections.
 4.  **Brings Up Tunnels**: It automatically brings up any connections in `ipsec.conf` that are not marked with `auto=start`.
 
+**Important:** For the container to be able to modify the host's firewall rules, it is essential that it is run with `network_mode: "host"`, as configured in the `docker-compose.yml` file.
+
 ### Networking Configuration
 
 The `entrypoint.sh` script is responsible for configuring the necessary networking rules on the host. It does this in a non-destructive way by adding and removing its specific `iptables` rules, ensuring it does not interfere with other firewall configurations.
@@ -61,9 +63,35 @@ These variables can be set in the `docker-compose.yml` file.
     docker-compose up -d
     ```
 
+### A Note on `iptables` Compatibility
+
+Modern Linux distributions are transitioning from the original `iptables` to a newer version based on the `nftables` kernel framework. The version of `iptables` in the container must match the version used by the host OS for the firewall rules to be applied correctly.
+
+This repository now builds two versions of the Docker image to ensure compatibility:
+
+-   `:legacy`: Based on Alpine 3.15, for hosts that still use the original `iptables`.
+-   `:nft`: Based on Alpine 3.19, for hosts that have transitioned to `iptables-nft`.
+
+If you are using the pre-built images, make sure to choose the correct tag for your host system in the `docker-compose.yml` file.
+
+If you are building the image manually, the `build-docker.sh` script will automatically build both versions and tag them with `:legacy` and `:nft`.
+
 ## Troubleshooting
 
--   **Connectivity issues**: Double-check the `LOCAL_NET`, `VPN_SUBNET`, and `OUT_INTERFACE` variables in `docker/entrypoint.sh`.
--   **Logs**: Check the container logs for connection errors: `docker logs ipsec-gateway`.
+-   **Firewall rules not appearing on the host:** If the container logs indicate that `iptables` rules are being created but they do not appear on your host system (e.g., `iptables -L`), it is almost certainly due to an `iptables` version mismatch.
+    1.  Check the container logs: `docker logs ipsec-gateway`.
+    2.  At the top of the logs, you will see the `iptables` version information from the container. For example:
+        ```
+        iptables v1.8.9 (legacy)
+        ```
+        or
+        ```
+        iptables v1.8.10 (nf_tables)
+        ```
+    3.  On your host system, run `iptables --version` to see which version your host is using.
+    4.  Ensure that the `iptables` version in the container matches the version on your host. If they do not match, you must use the image tag that corresponds to your host's `iptables` version (`:legacy` or `:nft`).
+
+-   **Connectivity issues**: Double-check the `LOCAL_NET`, `VPN_SUBNET`, and `OUT_INTERFACE` variables in your `docker-compose.yml` file.
+-   **Logs**: Check the container logs for any other connection errors: `docker logs ipsec-gateway`.
 
 This updated configuration should resolve issues where the VPN connects but traffic is not routed correctly.
