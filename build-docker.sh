@@ -47,8 +47,18 @@ echo "Target platforms: ${PLATFORMS}"
 # manifest list (which points to the platform-specific images) to the registry.
 # The '--push' flag is essential for creating a usable multi-arch image on Docker Hub.
 docker buildx build \
+    --build-arg IPTABLES_MODE=legacy \
+    --build-arg ALPINE_VERSION=3.15 \
     --platform "${PLATFORMS}" \
-    --tag "${IMAGE_NAME}:latest" \
+    --tag "${IMAGE_NAME}:legacy" \
+    --push \
+    "${BUILD_CONTEXT}"
+
+docker buildx build \
+    --build-arg IPTABLES_MODE=nft \
+    --build-arg ALPINE_VERSION=3.19 \
+    --platform "${PLATFORMS}" \
+    --tag "${IMAGE_NAME}:nft" \
     --push \
     "${BUILD_CONTEXT}"
 
