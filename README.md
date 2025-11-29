@@ -24,15 +24,20 @@ The `entrypoint.sh` script performs the following actions on startup:
 
 ### Networking Configuration
 
-The `entrypoint.sh` script is responsible for configuring the necessary networking rules on the host. It does this in a non-destructive way by adding and removing its specific `iptables` rules, ensuring it does not interfere with other firewall configurations.
+The `entrypoint.sh` script is responsible for configuring the necessary networking rules on the host. It now dynamically infers the local and remote subnets from your `ipsec.conf` file. For any connection marked with `auto=start`, the script will use the `leftsubnet` as your local network and the `rightsubnet` as the remote VPN network.
 
-You can configure the network settings by passing environment variables to the container. The following variables are supported, with sensible defaults provided:
+It will then automatically generate the appropriate `iptables` rules to allow traffic between these subnets. This removes the need to manually set the `LOCAL_NET` and `VPN_SUBNET` environment variables.
 
--   `LOCAL_NET`: The CIDR of your local network (default: `192.168.0.0/16`).
--   `VPN_SUBNET`: The virtual IP subnet for VPN clients (default: `10.10.0.0/24`).
--   `OUT_INTERFACE`: The primary network interface of your NAS/server. This is now optional and will be auto-detected if not provided.
+If the script cannot find any suitable connections in your `ipsec.conf`, it will fall back to using the environment variables or the default values.
 
-These variables can be set in the `docker-compose.yml` file.
+### strongSwan Configuration
+
+The container includes a default `strongswan.conf` file with the following settings:
+-   `install_routes = yes`: strongSwan will install routes into a separate routing table.
+-   `routing_table = 230`: Routes are installed into table 230 to avoid conflicts with the host's main routing table.
+-   `duplicheck.enable = yes`: Enables the `duplicheck` plugin to prevent multiple connections from the same peer.
+
+You can override this file by creating your own `strongswan.conf` and mounting it as a volume in the `docker-compose.yml` file.
 
 ## Usage
 
@@ -45,6 +50,7 @@ These variables can be set in the `docker-compose.yml` file.
 2.  **Customize your configuration:**
     -   Create an `ipsec.conf` file with your VPN connection details.
     -   Create an `ipsec.secrets` file with your credentials.
+    -   (Optional) Create a `strongswan.conf` to override the default settings.
 
 3.  **Build the Image (Optional):**
 
@@ -91,7 +97,7 @@ If you are building the image manually, the `build-docker.sh` script will automa
     3.  On your host system, run `iptables --version` to see which version your host is using.
     4.  Ensure that the `iptables` version in the container matches the version on your host. If they do not match, you must use the image tag that corresponds to your host's `iptables` version (`:legacy` or `:nft`).
 
--   **Connectivity issues**: Double-check the `LOCAL_NET`, `VPN_SUBNET`, and `OUT_INTERFACE` variables in your `docker-compose.yml` file.
+-   **Connectivity issues**: Double-check your `ipsec.conf` file to ensure the `leftsubnet` and `rightsubnet` values are correct.
 -   **Logs**: Check the container logs for any other connection errors: `docker logs ipsec-gateway`.
 
 This updated configuration should resolve issues where the VPN connects but traffic is not routed correctly.

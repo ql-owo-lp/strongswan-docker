@@ -17,6 +17,7 @@ services:
     volumes:
       - ./ipsec.conf:/etc/ipsec.conf
       - ./ipsec.secrets:/etc/ipsec.secrets
+      # - ./strongswan.conf:/etc/strongswan.conf
       
     # --- Critical Permissions ---
     # CAP_NET_ADMIN: Required to modify network configurations, specifically
