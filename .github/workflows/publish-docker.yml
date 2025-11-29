@@ -7,14 +7,14 @@ on:
 
 jobs:
   test:
-    name: Run E2E Tests
+    name: Run CI Tests
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
 
-      - name: Run E2E tests
-        run: sudo ./tests/e2e_test.sh
+      - name: Run CI tests
+        run: sudo ./tests/run_ci_tests.sh
 
   build_and_publish:
     name: Build and Publish Docker Image
