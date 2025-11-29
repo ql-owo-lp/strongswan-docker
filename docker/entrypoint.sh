@@ -10,12 +10,60 @@ echo "iptables binary: $(which iptables)"
 iptables --version
 echo "-----------------------------------------"
 
+# --- CRITICAL FIX 1: Enable IP Forwarding ---
+# Docker doesn't always enable this for the container namespace
+echo "Enabling IP Forwarding..."
+sysctl -w net.ipv4.ip_forward=1 || echo "Warning: Could not set ip_forward (container might lack privileges)"
+
 LOG_FILE="/var/log/strongswan.log"
 
 # --- Network Configuration ---
-# Set sane defaults for network variables, but allow them to be overridden by environment variables.
-LOCAL_NET="${LOCAL_NET:-192.168.0.0/16}"
-VPN_SUBNET="${VPN_SUBNET:-10.10.0.0/24}"
+# Parse ipsec.conf to discover the local and remote subnets.
+AWK_SCRIPT='
+    function process_conn() {
+        if (in_conn && auto && left && right) {
+            print left ";" right;
+        }
+        in_conn = 0; left = ""; right = ""; auto = 0;
+    }
+    # Ignore comments
+    /^[ \t]*#/ {next}
+    # Clean up the line
+    {
+        # Remove comments
+        sub(/#.*/, "");
+        # Remove leading/trailing whitespace
+        gsub(/^[ \t]+|[ \t]+$/, "");
+        # Remove whitespace around =
+        gsub(/[ \t]*=[ \t]*/, "=");
+    }
+    # Skip empty lines
+    /^[ \t]*$/ {next}
+    /conn %default/ {next}
+    /conn/ { process_conn(); in_conn = 1; }
+    in_conn && /auto=start/ { auto = 1; }
+    in_conn && /leftsubnet=/ { match($0, /[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+\/[0-9]+/); left=substr($0, RSTART, RLENGTH) }
+    in_conn && /rightsubnet=/ { match($0, /[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+\/[0-9]+/); right=substr($0, RSTART, RLENGTH) }
+    END { process_conn(); }
+'
+SUBNETS=$(awk "$AWK_SCRIPT" /etc/ipsec.conf)
+
+if [ -z "$SUBNETS" ]; then
+  echo "Warning: No connections with 'auto=start', 'leftsubnet', and 'rightsubnet' found in /etc/ipsec.conf."
+  echo "Using default LOCAL_NET and VPN_SUBNET. This may not be correct."
+  LOCAL_NET="${LOCAL_NET:-192.168.0.0/16}"
+  VPN_SUBNET="${VPN_SUBNET:-10.10.0.0/24}"
+  VPN_SUBNETS=($VPN_SUBNET)
+else
+  echo "Found the following subnets in ipsec.conf:"
+  echo "$SUBNETS"
+  # Use the first leftsubnet as our local network.
+  LOCAL_NET=$(echo "$SUBNETS" | head -n 1 | cut -d';' -f1)
+  # Use all rightsubnets as our VPN subnets.
+  VPN_SUBNETS=($(echo "$SUBNETS" | cut -d';' -f2 | sort -u))
+  echo "Inferred LOCAL_NET: ${LOCAL_NET}"
+  echo "Inferred VPN_SUBNETS: ${VPN_SUBNETS[*]}"
+fi
 
 # Auto-detect the primary network interface if not provided.
 if [ -z "$OUT_INTERFACE" ]; then
@@ -34,6 +82,7 @@ fi
 CHAIN_PREFIX="${IPTABLES_CHAIN_PREFIX:-STRONGSWAN}"
 CHAIN_NAT="${CHAIN_PREFIX}_NAT"
 CHAIN_FORWARD="${CHAIN_PREFIX}_FORWARD"
+CHAIN_MANGLE="${CHAIN_PREFIX}_MANGLE"
 
 create_chains() {
   echo "Creating dedicated iptables chains..."
@@ -41,18 +90,35 @@ create_chains() {
   iptables -t nat -N ${CHAIN_NAT} 2>/dev/null || true
   # Create FORWARD chain, ignoring "chain already exists" error
   iptables -N ${CHAIN_FORWARD} 2>/dev/null || true
+  # Create MANGLE chain for MSS clamping, ignoring "chain already exists" error
+  iptables -t mangle -N ${CHAIN_MANGLE} 2>/dev/null || true
   echo "Chains created."
 }
 
 # Define the iptables rules that will be added to our custom chains.
-IPTABLES_RULES=(
-  # NAT rules for the custom chain
-  "-t nat -A ${CHAIN_NAT} -d ${VPN_SUBNET} -j ACCEPT"
-  "-t nat -A ${CHAIN_NAT} -s ${VPN_SUBNET} -o ${OUT_INTERFACE} -j MASQUERADE"
-  # Forwarding rules for the custom chain
-  "-A ${CHAIN_FORWARD} -s ${VPN_SUBNET} -d ${LOCAL_NET} -j ACCEPT"
-  "-A ${CHAIN_FORWARD} -s ${LOCAL_NET} -d ${VPN_SUBNET} -j ACCEPT"
+IPTABLES_RULES=()
+MANGLE_RULES=()
+
+for vpn_subnet in "${VPN_SUBNETS[@]}"; do
+  echo "Generating rules for VPN subnet: ${vpn_subnet}"
+  IPTABLES_RULES+=(
+    # NAT rules for the custom chain
+    "-t nat -A ${CHAIN_NAT} -d ${vpn_subnet} -j ACCEPT"
+    "-t nat -A ${CHAIN_NAT} -s ${vpn_subnet} -o ${OUT_INTERFACE} -j MASQUERADE"
+    # Forwarding rules for the custom chain
+    "-A ${CHAIN_FORWARD} -s ${vpn_subnet} -d ${LOCAL_NET} -j ACCEPT"
+    "-A ${CHAIN_FORWARD} -s ${LOCAL_NET} -d ${vpn_subnet} -j ACCEPT"
+  )
+done
+
+# This rule should only be added once.
+IPTABLES_RULES+=(
   "-A ${CHAIN_FORWARD} -m state --state RELATED,ESTABLISHED -j ACCEPT"
+)
+
+# This fixes "packet too big" issues that freeze connections
+MANGLE_RULES+=(
+  "-t mangle -A ${CHAIN_MANGLE} -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu"
 )
 
 add_firewall_rules() {
@@ -60,8 +126,10 @@ add_firewall_rules() {
   # Link the custom chains to the main chains, ensuring they are at the top.
   iptables -t nat -I POSTROUTING 1 -j ${CHAIN_NAT} 2>/dev/null || true
   iptables -I FORWARD 1 -j ${CHAIN_FORWARD} 2>/dev/null || true
+  iptables -t mangle -I FORWARD 1 -j ${CHAIN_MANGLE} 2>/dev/null || true
+  iptables -t mangle -I OUTPUT 1 -j ${CHAIN_MANGLE} 2>/dev/null || true
 
-  for rule in "${IPTABLES_RULES[@]}"; do
+  for rule in "${IPTABLES_RULES[@]}" "${MANGLE_RULES[@]}"; do
     check_rule="${rule/-A/-C}"
     if ! iptables ${check_rule} >/dev/null 2>&1; then
       echo "  Adding rule: iptables ${rule}"
@@ -78,12 +146,16 @@ cleanup_firewall() {
   # Remove the jump rules from the main chains
   iptables -t nat -D POSTROUTING -j ${CHAIN_NAT} 2>/dev/null || true
   iptables -D FORWARD -j ${CHAIN_FORWARD} 2>/dev/null || true
+  iptables -t mangle -D FORWARD -j ${CHAIN_MANGLE} 2>/dev/null || true
+  iptables -t mangle -D OUTPUT -j ${CHAIN_MANGLE} 2>/dev/null || true
 
   # Flush and delete the custom chains
   iptables -t nat -F ${CHAIN_NAT} 2>/dev/null || true
   iptables -t nat -X ${CHAIN_NAT} 2>/dev/null || true
   iptables -F ${CHAIN_FORWARD} 2>/dev/null || true
   iptables -X ${CHAIN_FORWARD} 2>/dev/null || true
+  iptables -t mangle -F ${CHAIN_MANGLE} 2>/dev/null || true
+  iptables -t mangle -X ${CHAIN_MANGLE} 2>/dev/null || true
   echo "Firewall cleanup complete."
 }
 
