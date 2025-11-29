@@ -13,9 +13,43 @@ echo "-----------------------------------------"
 LOG_FILE="/var/log/strongswan.log"
 
 # --- Network Configuration ---
-# Set sane defaults for network variables, but allow them to be overridden by environment variables.
-LOCAL_NET="${LOCAL_NET:-192.168.0.0/16}"
-VPN_SUBNET="${VPN_SUBNET:-10.10.0.0/24}"
+# Parse ipsec.conf to discover the local and remote subnets.
+AWK_SCRIPT='
+    /conn %default/ {next}
+    /conn/ { in_conn = 1; left = ""; right = ""; auto = 0; }
+    in_conn && /auto=start/ { auto = 1; }
+    in_conn && /leftsubnet=/ { match($0, /[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+\/[0-9]+/); left=substr($0, RSTART, RLENGTH) }
+    in_conn && /rightsubnet=/ { match($0, /[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+\/[0-9]+/); right=substr($0, RSTART, RLENGTH) }
+    /^$/ {
+        if (in_conn && auto && left && right) {
+            print left ";" right;
+        }
+        in_conn = 0; left = ""; right = ""; auto = 0;
+    }
+    END {
+        if (in_conn && auto && left && right) {
+            print left ";" right;
+        }
+    }
+'
+SUBNETS=$(awk "$AWK_SCRIPT" /etc/ipsec.conf)
+
+if [ -z "$SUBNETS" ]; then
+  echo "Warning: No connections with 'auto=start', 'leftsubnet', and 'rightsubnet' found in /etc/ipsec.conf."
+  echo "Using default LOCAL_NET and VPN_SUBNET. This may not be correct."
+  LOCAL_NET="${LOCAL_NET:-192.168.0.0/16}"
+  VPN_SUBNET="${VPN_SUBNET:-10.10.0.0/24}"
+  VPN_SUBNETS=($VPN_SUBNET)
+else
+  echo "Found the following subnets in ipsec.conf:"
+  echo "$SUBNETS"
+  # Use the first leftsubnet as our local network.
+  LOCAL_NET=$(echo "$SUBNETS" | head -n 1 | cut -d';' -f1)
+  # Use all rightsubnets as our VPN subnets.
+  VPN_SUBNETS=($(echo "$SUBNETS" | cut -d';' -f2 | sort -u))
+  echo "Inferred LOCAL_NET: ${LOCAL_NET}"
+  echo "Inferred VPN_SUBNETS: ${VPN_SUBNETS[*]}"
+fi
 
 # Auto-detect the primary network interface if not provided.
 if [ -z "$OUT_INTERFACE" ]; then
@@ -45,13 +79,22 @@ create_chains() {
 }
 
 # Define the iptables rules that will be added to our custom chains.
-IPTABLES_RULES=(
-  # NAT rules for the custom chain
-  "-t nat -A ${CHAIN_NAT} -d ${VPN_SUBNET} -j ACCEPT"
-  "-t nat -A ${CHAIN_NAT} -s ${VPN_SUBNET} -o ${OUT_INTERFACE} -j MASQUERADE"
-  # Forwarding rules for the custom chain
-  "-A ${CHAIN_FORWARD} -s ${VPN_SUBNET} -d ${LOCAL_NET} -j ACCEPT"
-  "-A ${CHAIN_FORWARD} -s ${LOCAL_NET} -d ${VPN_SUBNET} -j ACCEPT"
+IPTABLES_RULES=()
+
+for vpn_subnet in "${VPN_SUBNETS[@]}"; do
+  echo "Generating rules for VPN subnet: ${vpn_subnet}"
+  IPTABLES_RULES+=(
+    # NAT rules for the custom chain
+    "-t nat -A ${CHAIN_NAT} -d ${vpn_subnet} -j ACCEPT"
+    "-t nat -A ${CHAIN_NAT} -s ${vpn_subnet} -o ${OUT_INTERFACE} -j MASQUERADE"
+    # Forwarding rules for the custom chain
+    "-A ${CHAIN_FORWARD} -s ${vpn_subnet} -d ${LOCAL_NET} -j ACCEPT"
+    "-A ${CHAIN_FORWARD} -s ${LOCAL_NET} -d ${vpn_subnet} -j ACCEPT"
+  )
+done
+
+# This rule should only be added once.
+IPTABLES_RULES+=(
   "-A ${CHAIN_FORWARD} -m state --state RELATED,ESTABLISHED -j ACCEPT"
 )
 
