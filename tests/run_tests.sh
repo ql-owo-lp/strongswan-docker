@@ -144,8 +144,11 @@ if [ "$(grep -c "iptables -A ${CHAIN_FORWARD} -s 10.10.1.0/24" ${IPTABLES_MOCK_L
   exit 1
 fi
 # MSS Clamping Rule
-if ! grep -E -q "iptables -t mangle -A ${CHAIN_MANGLE} -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss [0-9]+" ${IPTABLES_MOCK_LOG}; then
-  echo "FAIL: TCPMSS rule for MSS clamping not found!"
+# The rule should contain source/destination filtering and the MSS value.
+# Since we know the container defaults to 1500 MTU in this test environment,
+# the calculated MSS should be 1500 - 140 = 1360.
+if ! grep -E -q "iptables -t mangle -A ${CHAIN_MANGLE} .* -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1360" ${IPTABLES_MOCK_LOG}; then
+  echo "FAIL: TCPMSS rule for MSS clamping not found or value is incorrect (expected 1360)!"
   exit 1
 fi
 echo "Dynamic rule generation verified."
