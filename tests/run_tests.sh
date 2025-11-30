@@ -144,7 +144,7 @@ if [ "$(grep -c "iptables -A ${CHAIN_FORWARD} -s 10.10.1.0/24" ${IPTABLES_MOCK_L
   exit 1
 fi
 # MSS Clamping Rule
-if ! grep -q "iptables -t mangle -A ${CHAIN_MANGLE} -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu" ${IPTABLES_MOCK_LOG}; then
+if ! grep -E -q "iptables -t mangle -A ${CHAIN_MANGLE} -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss [0-9]+" ${IPTABLES_MOCK_LOG}; then
   echo "FAIL: TCPMSS rule for MSS clamping not found!"
   exit 1
 fi
