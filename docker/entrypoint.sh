@@ -78,6 +78,28 @@ else
   echo "Using provided OUT_INTERFACE: ${OUT_INTERFACE}"
 fi
 
+# --- DYNAMIC MSS CALCULATION ---
+# We detect the MTU of the outgoing interface and subtract overhead.
+# Overhead Calculation:
+#   20 bytes (IP Header) + 20 bytes (TCP Header) = 40 bytes standard overhead
+#   + ~80-100 bytes (IPsec ESP Overhead + Padding + Safety Margin)
+#   Total Deduction = 140 bytes.
+#   Example: 1500 MTU - 140 = 1360 MSS (Safe default)
+if [ -r "/sys/class/net/$OUT_INTERFACE/mtu" ]; then
+  DETECTED_MTU=$(cat "/sys/class/net/$OUT_INTERFACE/mtu")
+else
+  # Fallback using ip command if sysfs is not accessible
+  DETECTED_MTU=$(ip link show "$OUT_INTERFACE" | awk '/mtu/ {print $5}')
+fi
+
+if [ -z "$DETECTED_MTU" ] || [ "$DETECTED_MTU" -eq 0 ]; then
+  echo "Warning: Could not detect MTU for $OUT_INTERFACE. Defaulting to 1500."
+  DETECTED_MTU=1500
+fi
+
+MSS_VALUE=$((DETECTED_MTU - 140))
+echo "Detected MTU: $DETECTED_MTU. Calculated MSS: $MSS_VALUE (MTU - 140 bytes overhead)"
+
 # Allow overriding the iptables chain prefix to avoid conflicts
 CHAIN_PREFIX="${IPTABLES_CHAIN_PREFIX:-STRONGSWAN}"
 CHAIN_NAT="${CHAIN_PREFIX}_NAT"
@@ -116,9 +138,10 @@ IPTABLES_RULES+=(
   "-A ${CHAIN_FORWARD} -m state --state RELATED,ESTABLISHED -j ACCEPT"
 )
 
-# This fixes "packet too big" issues that freeze connections
+# --- CRITICAL FIX 2: MSS Clamping (DYNAMIC) ---
+# We use the dynamically calculated MSS_VALUE based on the interface MTU.
 MANGLE_RULES+=(
-  "-t mangle -A ${CHAIN_MANGLE} -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu"
+  "-t mangle -A ${CHAIN_MANGLE} -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss ${MSS_VALUE}"
 )
 
 add_firewall_rules() {
