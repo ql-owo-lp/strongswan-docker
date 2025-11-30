@@ -16,8 +16,20 @@ sysctl -w net.ipv4.ip_forward=1 || echo "Warning: Could not set ip_forward (cont
 
 LOG_FILE="/var/log/strongswan.log"
 
-# --- Network Configuration ---
-# Parse ipsec.conf to discover the local and remote subnets.
+# --- Dynamic Configuration Parsing ---
+
+# 1. Detect Routing Table from strongswan.conf
+# We grep for 'routing_table', remove spaces, and extract the value. Default to 220.
+echo "Detecting routing table from /etc/strongswan.conf..."
+if [ -f /etc/strongswan.conf ]; then
+    TABLE_NUM=$(grep "routing_table" /etc/strongswan.conf | grep -v "#" | head -n 1 | awk -F'=' '{print $2}' | tr -d ' ;')
+fi
+# Default to 220 if not found or empty
+TABLE_NUM=${TABLE_NUM:-220}
+echo "Using Routing Table: ${TABLE_NUM}"
+
+
+# 2. Parse ipsec.conf to discover subnets
 AWK_SCRIPT='
     function process_conn() {
         if (in_conn && auto && left && right) {
@@ -95,18 +107,18 @@ if [ -z "$DETECTED_MTU" ] || [ "$DETECTED_MTU" -eq 0 ]; then
 fi
 
 # --- CRITICAL FIX FOR JUMBO FRAMES ---
-# Even if your local LAN is 9000 MTU, the encrypted tunnel must travel 
-# over the public Internet, which is 1500 MTU.
-# If we don't cap this, we calculate MSS ~8860, creating 9KB encrypted packets
-# that get dropped instantly by your ISP.
-if [ "$DETECTED_MTU" -gt 1500 ]; then
-   echo "Detected Jumbo Frames (MTU $DETECTED_MTU). Capping at 1500 for Internet compatibility."
-   DETECTED_MTU=1500
+# Even if local MTU is 9000, internet is usually 1500.
+# We cap SAFE_MTU at 1500 to ensure packet delivery over public internet.
+SAFE_MTU=$DETECTED_MTU
+if [ "$SAFE_MTU" -gt 1500 ]; then
+   echo "Detected Jumbo Frames (MTU $SAFE_MTU). Capping at 1500 for Internet compatibility."
+   SAFE_MTU=1500
 fi
 
-# Calculate MSS (MTU - 140 bytes overhead)
-MSS_VALUE=$((DETECTED_MTU - 140))
-echo "Effective VPN Base MTU: $DETECTED_MTU. Setting dynamic MSS: $MSS_VALUE"
+# Maximize MSS: SAFE_MTU - 140 bytes (overhead)
+# 1500 - 140 = 1360. This is standard for IPsec.
+MSS_VALUE=$((SAFE_MTU - 140))
+echo "Effective VPN Base MTU: $SAFE_MTU. Setting calculated MSS: $MSS_VALUE"
 
 # Allow overriding the iptables chain prefix to avoid conflicts
 CHAIN_PREFIX="${IPTABLES_CHAIN_PREFIX:-STRONGSWAN}"
@@ -134,15 +146,9 @@ for vpn_subnet in "${VPN_SUBNETS[@]}"; do
     "-A ${CHAIN_FORWARD} -s ${LOCAL_NET} -d ${vpn_subnet} -j ACCEPT"
   )
   
-  # --- SCOPED MSS CLAMPING ---
-  # We strictly match -s or -d to prevent mangling unrelated LAN traffic
-  # which causes checksum failures on 10GbE interfaces.
-  
-  # 1. Inbound (INPUT/FORWARD): Traffic coming FROM the VPN
-  MANGLE_RULES+=(
-    "-t mangle -A ${CHAIN_MANGLE} -s ${vpn_subnet} -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss ${MSS_VALUE}"
-  )
-  # 2. Outbound (OUTPUT/FORWARD): Traffic going TO the VPN
+  # --- MSS CLAMPING (UPDATED) ---
+  # We clamp outbound SYN packets to force the REMOTE side to send small packets to us.
+  # This avoids checksum offloading issues on the local INPUT chain.
   MANGLE_RULES+=(
     "-t mangle -A ${CHAIN_MANGLE} -d ${vpn_subnet} -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss ${MSS_VALUE}"
   )
@@ -158,9 +164,7 @@ add_firewall_rules() {
   iptables -t nat -I POSTROUTING 1 -j ${CHAIN_NAT} 2>/dev/null || true
   iptables -I FORWARD 1 -j ${CHAIN_FORWARD} 2>/dev/null || true
   
-  # Apply MANGLE to INPUT, FORWARD, and OUTPUT
-  # The rules inside the chain are now scoped by IP, so it is safe to hook globally.
-  iptables -t mangle -I INPUT 1 -j ${CHAIN_MANGLE} 2>/dev/null || true
+  # Apply MANGLE to FORWARD and OUTPUT only.
   iptables -t mangle -I FORWARD 1 -j ${CHAIN_MANGLE} 2>/dev/null || true
   iptables -t mangle -I OUTPUT 1 -j ${CHAIN_MANGLE} 2>/dev/null || true
 
@@ -192,6 +196,30 @@ cleanup_firewall() {
   iptables -t mangle -F ${CHAIN_MANGLE} 2>/dev/null || true
   iptables -t mangle -X ${CHAIN_MANGLE} 2>/dev/null || true
   echo "Firewall cleanup complete."
+}
+
+# --- NEW: Route Monitor ---
+# This background function watches the detected table (TABLE_NUM).
+# If it sees a route with MTU > SAFE_MTU, it caps it.
+monitor_routes() {
+  echo "Starting Route Monitor for Table ${TABLE_NUM} (Target MTU: $SAFE_MTU)..."
+  while true; do
+    # Find routes in the table that do NOT have the correct MTU setting
+    # We filter for routes going to our VPN subnets
+    for subnet in "${VPN_SUBNETS[@]}"; do
+        # Check if route exists
+        if ip route show table "${TABLE_NUM}" "$subnet" >/dev/null 2>&1; then
+            # Check if it already has the mtu parameter set correctly
+            CURRENT_ROUTE=$(ip route show table "${TABLE_NUM}" "$subnet")
+            if [[ "$CURRENT_ROUTE" != *"mtu $SAFE_MTU"* ]]; then
+                 echo "Fixing MTU for route: $subnet in table ${TABLE_NUM}"
+                 # We use 'change' to preserve other attributes like src/via
+                 ip route change table "${TABLE_NUM}" $CURRENT_ROUTE mtu $SAFE_MTU || true
+            fi
+        fi
+    done
+    sleep 5
+  done
 }
 
 # --- Main Execution ---
@@ -246,6 +274,10 @@ else
     ipsec up "$conn"
   done
 fi
+
+# Start the route monitor in background
+monitor_routes &
+MONITOR_PID=$!
 
 echo "Initialization complete. Container is running and will stay alive."
 
