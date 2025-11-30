@@ -11,7 +11,6 @@ iptables --version
 echo "-----------------------------------------"
 
 # --- CRITICAL FIX 1: Enable IP Forwarding ---
-# Docker doesn't always enable this for the container namespace
 echo "Enabling IP Forwarding..."
 sysctl -w net.ipv4.ip_forward=1 || echo "Warning: Could not set ip_forward (container might lack privileges)"
 
@@ -79,12 +78,10 @@ else
 fi
 
 # --- DYNAMIC MSS CALCULATION ---
-# We detect the MTU of the outgoing interface and subtract overhead.
 # Overhead Calculation:
 #   20 bytes (IP Header) + 20 bytes (TCP Header) = 40 bytes standard overhead
 #   + ~80-100 bytes (IPsec ESP Overhead + Padding + Safety Margin)
 #   Total Deduction = 140 bytes.
-#   Example: 1500 MTU - 140 = 1360 MSS (Safe default)
 if [ -r "/sys/class/net/$OUT_INTERFACE/mtu" ]; then
   DETECTED_MTU=$(cat "/sys/class/net/$OUT_INTERFACE/mtu")
 else
@@ -97,8 +94,18 @@ if [ -z "$DETECTED_MTU" ] || [ "$DETECTED_MTU" -eq 0 ]; then
   DETECTED_MTU=1500
 fi
 
+# --- CRITICAL FIX FOR JUMBO FRAMES ---
+# Even if your local LAN is 9000 MTU, the encrypted tunnel must travel 
+# over the public Internet, which is 1500 MTU.
+# If we don't cap this, we calculate MSS ~8860, creating 9KB encrypted packets
+# that get dropped instantly by your ISP.
+if [ "$DETECTED_MTU" -gt 1500 ]; then
+   echo "Detected Jumbo Frames (MTU $DETECTED_MTU). Capping at 1500 for Internet compatibility."
+   DETECTED_MTU=1500
+fi
+
 MSS_VALUE=$((DETECTED_MTU - 140))
-echo "Detected MTU: $DETECTED_MTU. Calculated MSS: $MSS_VALUE (MTU - 140 bytes overhead)"
+echo "Effective VPN Base MTU: $DETECTED_MTU. Calculated MSS: $MSS_VALUE (Base - 140 bytes)"
 
 # Allow overriding the iptables chain prefix to avoid conflicts
 CHAIN_PREFIX="${IPTABLES_CHAIN_PREFIX:-STRONGSWAN}"
@@ -108,48 +115,46 @@ CHAIN_MANGLE="${CHAIN_PREFIX}_MANGLE"
 
 create_chains() {
   echo "Creating dedicated iptables chains..."
-  # Create NAT chain, ignoring "chain already exists" error
   iptables -t nat -N ${CHAIN_NAT} 2>/dev/null || true
-  # Create FORWARD chain, ignoring "chain already exists" error
   iptables -N ${CHAIN_FORWARD} 2>/dev/null || true
-  # Create MANGLE chain for MSS clamping, ignoring "chain already exists" error
   iptables -t mangle -N ${CHAIN_MANGLE} 2>/dev/null || true
   echo "Chains created."
 }
 
-# Define the iptables rules that will be added to our custom chains.
 IPTABLES_RULES=()
 MANGLE_RULES=()
 
 for vpn_subnet in "${VPN_SUBNETS[@]}"; do
   echo "Generating rules for VPN subnet: ${vpn_subnet}"
   IPTABLES_RULES+=(
-    # NAT rules for the custom chain
     "-t nat -A ${CHAIN_NAT} -d ${vpn_subnet} -j ACCEPT"
     "-t nat -A ${CHAIN_NAT} -s ${vpn_subnet} -o ${OUT_INTERFACE} -j MASQUERADE"
-    # Forwarding rules for the custom chain
     "-A ${CHAIN_FORWARD} -s ${vpn_subnet} -d ${LOCAL_NET} -j ACCEPT"
     "-A ${CHAIN_FORWARD} -s ${LOCAL_NET} -d ${vpn_subnet} -j ACCEPT"
   )
 done
 
-# This rule should only be added once.
 IPTABLES_RULES+=(
   "-A ${CHAIN_FORWARD} -m state --state RELATED,ESTABLISHED -j ACCEPT"
 )
 
 # --- CRITICAL FIX 2: MSS Clamping (DYNAMIC) ---
-# We use the dynamically calculated MSS_VALUE based on the interface MTU.
 MANGLE_RULES+=(
   "-t mangle -A ${CHAIN_MANGLE} -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss ${MSS_VALUE}"
 )
 
 add_firewall_rules() {
   echo "Adding firewall rules..."
-  # Link the custom chains to the main chains, ensuring they are at the top.
+  # Link the custom chains to the main chains
   iptables -t nat -I POSTROUTING 1 -j ${CHAIN_NAT} 2>/dev/null || true
   iptables -I FORWARD 1 -j ${CHAIN_FORWARD} 2>/dev/null || true
+  
+  # Apply MANGLE to INPUT, FORWARD, and OUTPUT
+  # INPUT: Clamps incoming packets (fixes remote side sending 9k MSS)
+  iptables -t mangle -I INPUT 1 -j ${CHAIN_MANGLE} 2>/dev/null || true
+  # FORWARD: Clamps traffic passing through the NAS
   iptables -t mangle -I FORWARD 1 -j ${CHAIN_MANGLE} 2>/dev/null || true
+  # OUTPUT: Clamps traffic leaving the NAS
   iptables -t mangle -I OUTPUT 1 -j ${CHAIN_MANGLE} 2>/dev/null || true
 
   for rule in "${IPTABLES_RULES[@]}" "${MANGLE_RULES[@]}"; do
@@ -166,13 +171,13 @@ add_firewall_rules() {
 
 cleanup_firewall() {
   echo "Cleaning up old firewall rules..."
-  # Remove the jump rules from the main chains
   iptables -t nat -D POSTROUTING -j ${CHAIN_NAT} 2>/dev/null || true
   iptables -D FORWARD -j ${CHAIN_FORWARD} 2>/dev/null || true
+  
+  iptables -t mangle -D INPUT -j ${CHAIN_MANGLE} 2>/dev/null || true
   iptables -t mangle -D FORWARD -j ${CHAIN_MANGLE} 2>/dev/null || true
   iptables -t mangle -D OUTPUT -j ${CHAIN_MANGLE} 2>/dev/null || true
 
-  # Flush and delete the custom chains
   iptables -t nat -F ${CHAIN_NAT} 2>/dev/null || true
   iptables -t nat -X ${CHAIN_NAT} 2>/dev/null || true
   iptables -F ${CHAIN_FORWARD} 2>/dev/null || true
@@ -183,7 +188,6 @@ cleanup_firewall() {
 }
 
 # --- Main Execution ---
-# If we are in a test environment, run the script in the foreground
 if [ -n "$IPTABLES_MOCK_LOG" ]; then
   cleanup_firewall
   create_chains
@@ -191,7 +195,6 @@ if [ -n "$IPTABLES_MOCK_LOG" ]; then
   exit 0
 fi
 
-# Clean up any old rules, create the chains, and add the new rules.
 cleanup_firewall
 create_chains
 add_firewall_rules
