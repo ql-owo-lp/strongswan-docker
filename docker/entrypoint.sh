@@ -90,10 +90,6 @@ else
 fi
 
 # --- DYNAMIC MSS CALCULATION ---
-# Overhead Calculation:
-#   20 bytes (IP Header) + 20 bytes (TCP Header) = 40 bytes standard overhead
-#   + ~80-100 bytes (IPsec ESP Overhead + Padding + Safety Margin)
-#   Total Deduction = 140 bytes.
 if [ -r "/sys/class/net/$OUT_INTERFACE/mtu" ]; then
   DETECTED_MTU=$(cat "/sys/class/net/$OUT_INTERFACE/mtu")
 else
@@ -108,17 +104,28 @@ fi
 
 # --- CRITICAL FIX FOR JUMBO FRAMES ---
 # Even if local MTU is 9000, internet is usually 1500.
-# We cap SAFE_MTU at 1500 to ensure packet delivery over public internet.
-SAFE_MTU=$DETECTED_MTU
-if [ "$SAFE_MTU" -gt 1500 ]; then
-   echo "Detected Jumbo Frames (MTU $SAFE_MTU). Capping at 1500 for Internet compatibility."
-   SAFE_MTU=1500
+INTERNET_MTU=$DETECTED_MTU
+if [ "$INTERNET_MTU" -gt 1500 ]; then
+   echo "Detected Jumbo Frames (MTU $INTERNET_MTU). Capping at 1500 for Internet compatibility."
+   INTERNET_MTU=1500
 fi
 
-# Maximize MSS: SAFE_MTU - 140 bytes (overhead)
-# 1500 - 140 = 1360. This is standard for IPsec.
-MSS_VALUE=$((SAFE_MTU - 140))
-echo "Effective VPN Base MTU: $SAFE_MTU. Setting calculated MSS: $MSS_VALUE"
+# --- ROUTE MTU CALCULATION (THE FIX) ---
+# We cannot set the VPN route to 1500, because 1500 plaintext + 80 overhead = 1580 encrypted.
+# 1580 will be dropped by the Internet Gateway.
+# We must reserve space for IPsec headers IN THE ROUTE ITSELF.
+# 1500 - 100 bytes (Overhead + Safety) = 1400.
+ROUTE_MTU=$((INTERNET_MTU - 100))
+
+# MSS Calculation: Route MTU - 40 bytes (IP+TCP headers)
+# 1400 - 40 = 1360.
+MSS_VALUE=$((ROUTE_MTU - 40))
+
+echo "Calculated Safe VPN Parameters:"
+echo "  Physical MTU: $DETECTED_MTU"
+echo "  Internet Ceiling: $INTERNET_MTU"
+echo "  VPN Route MTU: $ROUTE_MTU (Internet - 100 overhead)"
+echo "  TCP MSS: $MSS_VALUE (Route MTU - 40)"
 
 # Allow overriding the iptables chain prefix to avoid conflicts
 CHAIN_PREFIX="${IPTABLES_CHAIN_PREFIX:-STRONGSWAN}"
@@ -146,9 +153,8 @@ for vpn_subnet in "${VPN_SUBNETS[@]}"; do
     "-A ${CHAIN_FORWARD} -s ${LOCAL_NET} -d ${vpn_subnet} -j ACCEPT"
   )
   
-  # --- MSS CLAMPING (UPDATED) ---
+  # --- MSS CLAMPING ---
   # We clamp outbound SYN packets to force the REMOTE side to send small packets to us.
-  # This avoids checksum offloading issues on the local INPUT chain.
   MANGLE_RULES+=(
     "-t mangle -A ${CHAIN_MANGLE} -d ${vpn_subnet} -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss ${MSS_VALUE}"
   )
@@ -200,9 +206,9 @@ cleanup_firewall() {
 
 # --- NEW: Route Monitor ---
 # This background function watches the detected table (TABLE_NUM).
-# If it sees a route with MTU > SAFE_MTU, it caps it.
+# If it sees a route with MTU > ROUTE_MTU, it caps it.
 monitor_routes() {
-  echo "Starting Route Monitor for Table ${TABLE_NUM} (Target MTU: $SAFE_MTU)..."
+  echo "Starting Route Monitor for Table ${TABLE_NUM} (Target MTU: $ROUTE_MTU)..."
   while true; do
     # Find routes in the table that do NOT have the correct MTU setting
     # We filter for routes going to our VPN subnets
@@ -211,10 +217,10 @@ monitor_routes() {
         if ip route show table "${TABLE_NUM}" "$subnet" >/dev/null 2>&1; then
             # Check if it already has the mtu parameter set correctly
             CURRENT_ROUTE=$(ip route show table "${TABLE_NUM}" "$subnet")
-            if [[ "$CURRENT_ROUTE" != *"mtu $SAFE_MTU"* ]]; then
+            if [[ "$CURRENT_ROUTE" != *"mtu $ROUTE_MTU"* ]]; then
                  echo "Fixing MTU for route: $subnet in table ${TABLE_NUM}"
                  # We use 'change' to preserve other attributes like src/via
-                 ip route change table "${TABLE_NUM}" $CURRENT_ROUTE mtu $SAFE_MTU || true
+                 ip route change table "${TABLE_NUM}" $CURRENT_ROUTE mtu $ROUTE_MTU || true
             fi
         fi
     done
