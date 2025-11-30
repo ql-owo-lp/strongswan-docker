@@ -104,9 +104,9 @@ if [ "$DETECTED_MTU" -gt 1500 ]; then
    DETECTED_MTU=1500
 fi
 
-# Increased safety margin to 1280 (IPv6 min MTU) to prevent edge-case drops
-MSS_VALUE=1280
-echo "Effective VPN Base MTU: $DETECTED_MTU. Setting safe MSS: $MSS_VALUE"
+# Calculate MSS (MTU - 140 bytes overhead)
+MSS_VALUE=$((DETECTED_MTU - 140))
+echo "Effective VPN Base MTU: $DETECTED_MTU. Setting dynamic MSS: $MSS_VALUE"
 
 # Allow overriding the iptables chain prefix to avoid conflicts
 CHAIN_PREFIX="${IPTABLES_CHAIN_PREFIX:-STRONGSWAN}"
