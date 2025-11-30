@@ -104,8 +104,9 @@ if [ "$DETECTED_MTU" -gt 1500 ]; then
    DETECTED_MTU=1500
 fi
 
-MSS_VALUE=$((DETECTED_MTU - 140))
-echo "Effective VPN Base MTU: $DETECTED_MTU. Calculated MSS: $MSS_VALUE (Base - 140 bytes)"
+# Increased safety margin to 1280 (IPv6 min MTU) to prevent edge-case drops
+MSS_VALUE=1280
+echo "Effective VPN Base MTU: $DETECTED_MTU. Setting safe MSS: $MSS_VALUE"
 
 # Allow overriding the iptables chain prefix to avoid conflicts
 CHAIN_PREFIX="${IPTABLES_CHAIN_PREFIX:-STRONGSWAN}"
@@ -132,15 +133,23 @@ for vpn_subnet in "${VPN_SUBNETS[@]}"; do
     "-A ${CHAIN_FORWARD} -s ${vpn_subnet} -d ${LOCAL_NET} -j ACCEPT"
     "-A ${CHAIN_FORWARD} -s ${LOCAL_NET} -d ${vpn_subnet} -j ACCEPT"
   )
+  
+  # --- SCOPED MSS CLAMPING ---
+  # We strictly match -s or -d to prevent mangling unrelated LAN traffic
+  # which causes checksum failures on 10GbE interfaces.
+  
+  # 1. Inbound (INPUT/FORWARD): Traffic coming FROM the VPN
+  MANGLE_RULES+=(
+    "-t mangle -A ${CHAIN_MANGLE} -s ${vpn_subnet} -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss ${MSS_VALUE}"
+  )
+  # 2. Outbound (OUTPUT/FORWARD): Traffic going TO the VPN
+  MANGLE_RULES+=(
+    "-t mangle -A ${CHAIN_MANGLE} -d ${vpn_subnet} -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss ${MSS_VALUE}"
+  )
 done
 
 IPTABLES_RULES+=(
   "-A ${CHAIN_FORWARD} -m state --state RELATED,ESTABLISHED -j ACCEPT"
-)
-
-# --- CRITICAL FIX 2: MSS Clamping (DYNAMIC) ---
-MANGLE_RULES+=(
-  "-t mangle -A ${CHAIN_MANGLE} -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss ${MSS_VALUE}"
 )
 
 add_firewall_rules() {
@@ -150,11 +159,9 @@ add_firewall_rules() {
   iptables -I FORWARD 1 -j ${CHAIN_FORWARD} 2>/dev/null || true
   
   # Apply MANGLE to INPUT, FORWARD, and OUTPUT
-  # INPUT: Clamps incoming packets (fixes remote side sending 9k MSS)
+  # The rules inside the chain are now scoped by IP, so it is safe to hook globally.
   iptables -t mangle -I INPUT 1 -j ${CHAIN_MANGLE} 2>/dev/null || true
-  # FORWARD: Clamps traffic passing through the NAS
   iptables -t mangle -I FORWARD 1 -j ${CHAIN_MANGLE} 2>/dev/null || true
-  # OUTPUT: Clamps traffic leaving the NAS
   iptables -t mangle -I OUTPUT 1 -j ${CHAIN_MANGLE} 2>/dev/null || true
 
   for rule in "${IPTABLES_RULES[@]}" "${MANGLE_RULES[@]}"; do
