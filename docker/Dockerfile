@@ -10,12 +10,14 @@ FROM mirror.gcr.io/library/alpine:${ALPINE_VERSION}
 # --- Package Installation ---
 # Install strongSwan and essential network tools. The specific packages
 # will be installed based on the Alpine version.
+# Added gawk for robust configuration parsing.
 RUN apk update && \
     apk add --no-cache \
         strongswan \
         bash \
         iproute2 \
-        iptables && \
+        iptables \
+        gawk && \
     rm -rf /var/cache/apk/*
 
 # --- Configuration ---
