@@ -2,7 +2,7 @@
 set -e
 
 # --- Diagnostic Logging ---
-echo "--- Initializing strongSwan Container (VTI Enabled) ---"
+echo "--- Initializing strongSwan Container (VTI & Legacy Dual-Mode) ---"
 echo "Detecting iptables version..."
 echo "iptables binary: $(command -v iptables || echo 'Not found')"
 iptables --version
@@ -13,6 +13,18 @@ echo "Enabling IP Forwarding..."
 sysctl -w net.ipv4.ip_forward=1 || echo "Warning: Could not set ip_forward"
 
 LOG_FILE="/var/log/strongswan.log"
+
+# --- DYNAMIC CONFIGURATION PARSING ---
+
+# 1. Detect Routing Table from strongswan.conf
+# We grep for 'routing_table', remove spaces, and extract the value. Default to 220.
+echo "Detecting routing table from /etc/strongswan.conf..."
+if [ -f /etc/strongswan.conf ]; then
+    TABLE_NUM=$(grep "routing_table" /etc/strongswan.conf | grep -v "#" | head -n 1 | awk -F'=' '{print $2}' | tr -d ' ;')
+fi
+# Default to 220 if not found or empty
+TABLE_NUM=${TABLE_NUM:-220}
+echo "Using Routing Table: ${TABLE_NUM}"
 
 # --- CONFIGURATION PARSER ---
 # This script extracts connections and their VTI parameters (mark, left, right, subnets)
@@ -50,9 +62,6 @@ AWK_SCRIPT='
 '
 
 # Read configs from ipsec.conf
-# Note: This looks specifically at /etc/ipsec.conf.
-# If your connections are defined inside strongswan.conf, they will be missed
-# unless you move them to ipsec.conf (the standard location).
 echo "DEBUG: Reading /etc/ipsec.conf:"
 cat /etc/ipsec.conf
 echo "DEBUG: End of /etc/ipsec.conf"
@@ -102,8 +111,6 @@ setup_vti() {
     local vti_name="vti${mark}"
 
     # VTI MTU: 1400 is the "Golden Number".
-    # 1400 + IPsec Overhead < 1500 (Internet MTU).
-    # This prevents fragmentation/drops on the WAN.
     local vti_mtu=1400
 
     if ip link show "$vti_name" >/dev/null 2>&1; then
@@ -115,15 +122,35 @@ setup_vti() {
     ip tunnel add "$vti_name" mode vti local "$local_ip" remote "$remote_ip" key "$mark"
     ip link set "$vti_name" up mtu "$vti_mtu"
 
-    # Disable policy lookup on the VTI interface itself (prevents loops)
+    # Disable policy lookup on the VTI interface itself
     sysctl -w "net.ipv4.conf.${vti_name}.disable_policy=1" >/dev/null
 
     # Add routing for remote subnets
-    # We parse the comma-separated remote subnets
     IFS=',' read -ra SUBNETS <<< "$4"
     for subnet in "${SUBNETS[@]}"; do
         echo "  -> Routing $subnet via $vti_name"
         ip route add "$subnet" dev "$vti_name"
+    done
+}
+
+# --- LEGACY ROUTE MONITOR (CRITICAL FOR JUMBO FRAMES) ---
+# StrongSwan installs routes into the configured table (default 220) with physical MTU (9000).
+# We must force these routes to 1400 to prevent sending Jumbo Packets over VPN.
+monitor_legacy_routes() {
+    echo "Starting Legacy Route Monitor (Table ${TABLE_NUM}, Target MTU: 1400)..."
+    while true; do
+        # List all routes in the detected table. If any route lacks "mtu 1400", we fix it.
+        # We ignore 'throw' routes which are used for bypass.
+        ip route show table ${TABLE_NUM} | while read -r route; do
+            if [[ "$route" != *"mtu 1400"* ]] && [[ "$route" != *"throw"* ]]; then
+                 # Extract the destination (first word)
+                 dst=$(echo "$route" | awk '{print $1}')
+                 echo "Fixing MTU for legacy route: $dst in table ${TABLE_NUM}"
+                 # We simply re-add the route with the correct MTU, which updates it
+                 ip route change table ${TABLE_NUM} $route mtu 1400 || true
+            fi
+        done
+        sleep 5
     done
 }
 
@@ -134,9 +161,10 @@ apply_firewall() {
     # Accept existing connections
     iptables -A ${CHAIN_FORWARD} -m state --state RELATED,ESTABLISHED -j ACCEPT
 
+    local legacy_active=0
+
     # Parse config to generate rules
     while IFS=';' read -r name mark left right left_sub right_sub; do
-        # Skip empty lines
         if [ -z "$name" ]; then continue; fi
 
         if [ "$mark" != "0" ]; then
@@ -156,7 +184,8 @@ apply_firewall() {
         else
             # --- LEGACY POLICY MODE ---
             echo "Configuring Policy Firewall for $name..."
-            # (Keep your basic NAT/Forward logic for non-VTI connections)
+            legacy_active=1
+
             IFS=',' read -ra R_SUBNETS <<< "$right_sub"
             for subnet in "${R_SUBNETS[@]}"; do
                  iptables -t nat -A ${CHAIN_NAT} -d "$subnet" -j ACCEPT
@@ -165,10 +194,18 @@ apply_firewall() {
                  iptables -A ${CHAIN_FORWARD} -d "$subnet" -j ACCEPT
             done
 
-            # Basic MSS Clamping fallback for Legacy Mode
+            # MSS Clamping for Legacy Mode
+            # 1. FORWARD: Traffic passing through
             iptables -t mangle -A FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1360 2>/dev/null || true
+            # 2. OUTPUT: Local traffic (CRITICAL: Fixes iperf from the NAS itself)
+            iptables -t mangle -A OUTPUT  -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1360 2>/dev/null || true
         fi
     done <<< "$CONFIG_DATA"
+
+    # Start Route Monitor if we have legacy connections
+    if [ "$legacy_active" -eq 1 ]; then
+        monitor_legacy_routes &
+    fi
 }
 
 # --- Main Execution ---
