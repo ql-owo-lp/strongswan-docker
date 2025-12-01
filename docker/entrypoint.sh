@@ -2,291 +2,210 @@
 set -e
 
 # --- Diagnostic Logging ---
-echo "--- Initializing strongSwan Container ---"
+echo "--- Initializing strongSwan Container (VTI Enabled) ---"
 echo "Detecting iptables version..."
-# Log the path to the iptables executable
-echo "iptables binary: $(which iptables)"
-# Log the version of iptables, which indicates if it's legacy or nft
+echo "iptables binary: $(command -v iptables || echo 'Not found')"
 iptables --version
 echo "-----------------------------------------"
 
-# --- CRITICAL FIX 1: Enable IP Forwarding ---
+# --- CRITICAL: Enable IP Forwarding ---
 echo "Enabling IP Forwarding..."
-sysctl -w net.ipv4.ip_forward=1 || echo "Warning: Could not set ip_forward (container might lack privileges)"
+sysctl -w net.ipv4.ip_forward=1 || echo "Warning: Could not set ip_forward"
 
 LOG_FILE="/var/log/strongswan.log"
 
-# --- Dynamic Configuration Parsing ---
-
-# 1. Detect Routing Table from strongswan.conf
-# We grep for 'routing_table', remove spaces, and extract the value. Default to 220.
-echo "Detecting routing table from /etc/strongswan.conf..."
-if [ -f /etc/strongswan.conf ]; then
-    TABLE_NUM=$(grep "routing_table" /etc/strongswan.conf | grep -v "#" | head -n 1 | awk -F'=' '{print $2}' | tr -d ' ;')
-fi
-# Default to 220 if not found or empty
-TABLE_NUM=${TABLE_NUM:-220}
-echo "Using Routing Table: ${TABLE_NUM}"
-
-
-# 2. Parse ipsec.conf to discover subnets
+# --- CONFIGURATION PARSER ---
+# This script extracts connections and their VTI parameters (mark, left, right, subnets)
+# Format output: CONN_NAME;MARK;LEFT_IP;RIGHT_IP;LOCAL_SUBNETS;REMOTE_SUBNETS
 AWK_SCRIPT='
     function process_conn() {
         if (in_conn && auto && left && right) {
-            print left ";" right;
+            # Default mark to 0 if not set
+            if (mark == "") mark="0";
+            print name ";" mark ";" left ";" right ";" left_sub ";" right_sub;
         }
-        in_conn = 0; left = ""; right = ""; auto = 0;
+        in_conn = 0; name=""; mark=""; left=""; right=""; left_sub=""; right_sub=""; auto=0;
     }
-    # Ignore comments
-    /^[ \t]*#/ {next}
-    # Clean up the line
-    {
-        # Remove comments
-        sub(/#.*/, "");
-        # Remove leading/trailing whitespace
-        gsub(/^[ \t]+|[ \t]+$/, "");
-        # Remove whitespace around =
-        gsub(/[ \t]*=[ \t]*/, "=");
-    }
+    # Clean up line: remove comments, trim whitespace, compact "=", remove CR
+    { sub(/#.*/, ""); gsub(/^[ \t]+|[ \t]+$/, ""); gsub(/[ \t]*=[ \t]*/, "="); gsub(/\r/, ""); }
+
     # Skip empty lines
     /^[ \t]*$/ {next}
+
+    # Skip default section
     /conn %default/ {next}
-    /conn/ { process_conn(); in_conn = 1; }
-    in_conn && /auto=start/ { auto = 1; }
-    in_conn && /leftsubnet=/ { match($0, /[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+\/[0-9]+/); left=substr($0, RSTART, RLENGTH) }
-    in_conn && /rightsubnet=/ { match($0, /[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+\/[0-9]+/); right=substr($0, RSTART, RLENGTH) }
+
+    # Start of a new connection
+    /^conn / { process_conn(); in_conn=1; name=$2; }
+
+    # Parse parameters (splitting by "=")
+    in_conn && /^auto=start/ { auto=1; }
+    in_conn && /^mark=/ { split($0, a, "="); mark=a[2]; }
+    in_conn && /^left=/ { split($0, a, "="); left=a[2]; }
+    in_conn && /^right=/ { split($0, a, "="); right=a[2]; }
+    in_conn && /^leftsubnet=/ { split($0, a, "="); left_sub=a[2]; }
+    in_conn && /^rightsubnet=/ { split($0, a, "="); right_sub=a[2]; }
+
     END { process_conn(); }
 '
-SUBNETS=$(awk "$AWK_SCRIPT" /etc/ipsec.conf)
 
-if [ -z "$SUBNETS" ]; then
-  echo "Warning: No connections with 'auto=start', 'leftsubnet', and 'rightsubnet' found in /etc/ipsec.conf."
-  echo "Using default LOCAL_NET and VPN_SUBNET. This may not be correct."
-  LOCAL_NET="${LOCAL_NET:-192.168.0.0/16}"
-  VPN_SUBNET="${VPN_SUBNET:-10.10.0.0/24}"
-  VPN_SUBNETS=($VPN_SUBNET)
-else
-  echo "Found the following subnets in ipsec.conf:"
-  echo "$SUBNETS"
-  # Use the first leftsubnet as our local network.
-  LOCAL_NET=$(echo "$SUBNETS" | head -n 1 | cut -d';' -f1)
-  # Use all rightsubnets as our VPN subnets.
-  VPN_SUBNETS=($(echo "$SUBNETS" | cut -d';' -f2 | sort -u))
-  echo "Inferred LOCAL_NET: ${LOCAL_NET}"
-  echo "Inferred VPN_SUBNETS: ${VPN_SUBNETS[*]}"
+# Read configs from ipsec.conf
+# Note: This looks specifically at /etc/ipsec.conf.
+# If your connections are defined inside strongswan.conf, they will be missed
+# unless you move them to ipsec.conf (the standard location).
+echo "DEBUG: Reading /etc/ipsec.conf:"
+cat /etc/ipsec.conf
+echo "DEBUG: End of /etc/ipsec.conf"
+
+# Use gawk if available, otherwise awk
+AWK_BIN="awk"
+if command -v gawk >/dev/null; then
+    AWK_BIN="gawk"
 fi
+echo "Using AWK: $AWK_BIN"
 
-# Auto-detect the primary network interface if not provided.
+CONFIG_DATA=$($AWK_BIN "$AWK_SCRIPT" /etc/ipsec.conf)
+echo "DEBUG: Parsed Configuration:"
+echo "$CONFIG_DATA"
+echo "DEBUG: End Configuration"
+
+# Detect Interface
 if [ -z "$OUT_INTERFACE" ]; then
-  echo "OUT_INTERFACE not set. Detecting default interface..."
-  OUT_INTERFACE=$(ip route | grep default | awk '{print $5}')
-  if [ -z "$OUT_INTERFACE" ]; then
-    echo "Could not detect default interface. Please set OUT_INTERFACE manually."
-    exit 1
-  fi
-  echo "Detected default interface: ${OUT_INTERFACE}"
-else
-  echo "Using provided OUT_INTERFACE: ${OUT_INTERFACE}"
+  OUT_INTERFACE=$(ip route | grep default | $AWK_BIN '{print $5}')
 fi
+echo "Physical Interface: $OUT_INTERFACE"
 
-# --- DYNAMIC MSS CALCULATION ---
-if [ -r "/sys/class/net/$OUT_INTERFACE/mtu" ]; then
-  DETECTED_MTU=$(cat "/sys/class/net/$OUT_INTERFACE/mtu")
-else
-  # Fallback using ip command if sysfs is not accessible
-  DETECTED_MTU=$(ip link show "$OUT_INTERFACE" | awk '/mtu/ {print $5}')
-fi
-
-if [ -z "$DETECTED_MTU" ] || [ "$DETECTED_MTU" -eq 0 ]; then
-  echo "Warning: Could not detect MTU for $OUT_INTERFACE. Defaulting to 1500."
-  DETECTED_MTU=1500
-fi
-
-# --- CRITICAL FIX FOR JUMBO FRAMES ---
-# Even if local MTU is 9000, internet is usually 1500.
-INTERNET_MTU=$DETECTED_MTU
-if [ "$INTERNET_MTU" -gt 1500 ]; then
-   echo "Detected Jumbo Frames (MTU $INTERNET_MTU). Capping at 1500 for Internet compatibility."
-   INTERNET_MTU=1500
-fi
-
-# --- ROUTE MTU CALCULATION (THE FIX) ---
-# We cannot set the VPN route to 1500, because 1500 plaintext + 80 overhead = 1580 encrypted.
-# 1580 will be dropped by the Internet Gateway.
-# We must reserve space for IPsec headers IN THE ROUTE ITSELF.
-# 1500 - 100 bytes (Overhead + Safety) = 1400.
-ROUTE_MTU=$((INTERNET_MTU - 100))
-
-# MSS Calculation: Route MTU - 40 bytes (IP+TCP headers)
-# 1400 - 40 = 1360.
-MSS_VALUE=$((ROUTE_MTU - 40))
-
-echo "Calculated Safe VPN Parameters:"
-echo "  Physical MTU: $DETECTED_MTU"
-echo "  Internet Ceiling: $INTERNET_MTU"
-echo "  VPN Route MTU: $ROUTE_MTU (Internet - 100 overhead)"
-echo "  TCP MSS: $MSS_VALUE (Route MTU - 40)"
-
-# Allow overriding the iptables chain prefix to avoid conflicts
+# --- FIREWALL & VTI SETUP ---
 CHAIN_PREFIX="${IPTABLES_CHAIN_PREFIX:-STRONGSWAN}"
 CHAIN_NAT="${CHAIN_PREFIX}_NAT"
 CHAIN_FORWARD="${CHAIN_PREFIX}_FORWARD"
-CHAIN_MANGLE="${CHAIN_PREFIX}_MANGLE"
 
 create_chains() {
-  echo "Creating dedicated iptables chains..."
   iptables -t nat -N ${CHAIN_NAT} 2>/dev/null || true
   iptables -N ${CHAIN_FORWARD} 2>/dev/null || true
-  iptables -t mangle -N ${CHAIN_MANGLE} 2>/dev/null || true
-  echo "Chains created."
-}
-
-IPTABLES_RULES=()
-MANGLE_RULES=()
-
-for vpn_subnet in "${VPN_SUBNETS[@]}"; do
-  echo "Generating rules for VPN subnet: ${vpn_subnet}"
-  IPTABLES_RULES+=(
-    "-t nat -A ${CHAIN_NAT} -d ${vpn_subnet} -j ACCEPT"
-    "-t nat -A ${CHAIN_NAT} -s ${vpn_subnet} -o ${OUT_INTERFACE} -j MASQUERADE"
-    "-A ${CHAIN_FORWARD} -s ${vpn_subnet} -d ${LOCAL_NET} -j ACCEPT"
-    "-A ${CHAIN_FORWARD} -s ${LOCAL_NET} -d ${vpn_subnet} -j ACCEPT"
-  )
-  
-  # --- MSS CLAMPING ---
-  # We clamp outbound SYN packets to force the REMOTE side to send small packets to us.
-  MANGLE_RULES+=(
-    "-t mangle -A ${CHAIN_MANGLE} -d ${vpn_subnet} -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss ${MSS_VALUE}"
-  )
-done
-
-IPTABLES_RULES+=(
-  "-A ${CHAIN_FORWARD} -m state --state RELATED,ESTABLISHED -j ACCEPT"
-)
-
-add_firewall_rules() {
-  echo "Adding firewall rules..."
-  # Link the custom chains to the main chains
-  iptables -t nat -I POSTROUTING 1 -j ${CHAIN_NAT} 2>/dev/null || true
-  iptables -I FORWARD 1 -j ${CHAIN_FORWARD} 2>/dev/null || true
-  
-  # Apply MANGLE to FORWARD and OUTPUT only.
-  iptables -t mangle -I FORWARD 1 -j ${CHAIN_MANGLE} 2>/dev/null || true
-  iptables -t mangle -I OUTPUT 1 -j ${CHAIN_MANGLE} 2>/dev/null || true
-
-  for rule in "${IPTABLES_RULES[@]}" "${MANGLE_RULES[@]}"; do
-    check_rule="${rule/-A/-C}"
-    if ! iptables ${check_rule} >/dev/null 2>&1; then
-      echo "  Adding rule: iptables ${rule}"
-      iptables ${rule}
-    else
-      echo "  Rule already exists: iptables ${rule}"
-    fi
-  done
-  echo "Firewall rules applied."
 }
 
 cleanup_firewall() {
-  echo "Cleaning up old firewall rules..."
+  echo "Cleaning up firewall..."
   iptables -t nat -D POSTROUTING -j ${CHAIN_NAT} 2>/dev/null || true
   iptables -D FORWARD -j ${CHAIN_FORWARD} 2>/dev/null || true
-  
-  iptables -t mangle -D INPUT -j ${CHAIN_MANGLE} 2>/dev/null || true
-  iptables -t mangle -D FORWARD -j ${CHAIN_MANGLE} 2>/dev/null || true
-  iptables -t mangle -D OUTPUT -j ${CHAIN_MANGLE} 2>/dev/null || true
-
   iptables -t nat -F ${CHAIN_NAT} 2>/dev/null || true
   iptables -t nat -X ${CHAIN_NAT} 2>/dev/null || true
   iptables -F ${CHAIN_FORWARD} 2>/dev/null || true
   iptables -X ${CHAIN_FORWARD} 2>/dev/null || true
-  iptables -t mangle -F ${CHAIN_MANGLE} 2>/dev/null || true
-  iptables -t mangle -X ${CHAIN_MANGLE} 2>/dev/null || true
-  echo "Firewall cleanup complete."
 }
 
-# --- NEW: Route Monitor ---
-# This background function watches the detected table (TABLE_NUM).
-# If it sees a route with MTU > ROUTE_MTU, it caps it.
-monitor_routes() {
-  echo "Starting Route Monitor for Table ${TABLE_NUM} (Target MTU: $ROUTE_MTU)..."
-  while true; do
-    # Find routes in the table that do NOT have the correct MTU setting
-    # We filter for routes going to our VPN subnets
-    for subnet in "${VPN_SUBNETS[@]}"; do
-        # Check if route exists
-        if ip route show table "${TABLE_NUM}" "$subnet" >/dev/null 2>&1; then
-            # Check if it already has the mtu parameter set correctly
-            CURRENT_ROUTE=$(ip route show table "${TABLE_NUM}" "$subnet")
-            if [[ "$CURRENT_ROUTE" != *"mtu $ROUTE_MTU"* ]]; then
-                 echo "Fixing MTU for route: $subnet in table ${TABLE_NUM}"
-                 # We use 'change' to preserve other attributes like src/via
-                 ip route change table "${TABLE_NUM}" $CURRENT_ROUTE mtu $ROUTE_MTU || true
-            fi
-        fi
+setup_vti() {
+    local mark=$1
+    local local_ip=$2
+    local remote_ip=$3
+    local vti_name="vti${mark}"
+
+    # VTI MTU: 1400 is the "Golden Number".
+    # 1400 + IPsec Overhead < 1500 (Internet MTU).
+    # This prevents fragmentation/drops on the WAN.
+    local vti_mtu=1400
+
+    if ip link show "$vti_name" >/dev/null 2>&1; then
+        echo "VTI interface $vti_name already exists, resetting..."
+        ip link del "$vti_name"
+    fi
+
+    echo "Creating VTI Interface: $vti_name (MTU: $vti_mtu, Mark: $mark)"
+    ip tunnel add "$vti_name" mode vti local "$local_ip" remote "$remote_ip" key "$mark"
+    ip link set "$vti_name" up mtu "$vti_mtu"
+
+    # Disable policy lookup on the VTI interface itself (prevents loops)
+    sysctl -w "net.ipv4.conf.${vti_name}.disable_policy=1" >/dev/null
+
+    # Add routing for remote subnets
+    # We parse the comma-separated remote subnets
+    IFS=',' read -ra SUBNETS <<< "$4"
+    for subnet in "${SUBNETS[@]}"; do
+        echo "  -> Routing $subnet via $vti_name"
+        ip route add "$subnet" dev "$vti_name"
     done
-    sleep 5
-  done
+}
+
+apply_firewall() {
+    iptables -t nat -I POSTROUTING 1 -j ${CHAIN_NAT} 2>/dev/null || true
+    iptables -I FORWARD 1 -j ${CHAIN_FORWARD} 2>/dev/null || true
+
+    # Accept existing connections
+    iptables -A ${CHAIN_FORWARD} -m state --state RELATED,ESTABLISHED -j ACCEPT
+
+    # Parse config to generate rules
+    while IFS=';' read -r name mark left right left_sub right_sub; do
+        # Skip empty lines
+        if [ -z "$name" ]; then continue; fi
+
+        if [ "$mark" != "0" ]; then
+            # --- VTI MODE ---
+            echo "Configuring VTI Firewall for $name (vti${mark})..."
+            setup_vti "$mark" "$left" "$right" "$right_sub"
+
+            # Allow forwarding over VTI
+            iptables -A ${CHAIN_FORWARD} -i "vti${mark}" -j ACCEPT
+            iptables -A ${CHAIN_FORWARD} -o "vti${mark}" -j ACCEPT
+
+            # NAT Exemption (Critical)
+            IFS=',' read -ra R_SUBNETS <<< "$right_sub"
+            for subnet in "${R_SUBNETS[@]}"; do
+                iptables -t nat -A ${CHAIN_NAT} -d "$subnet" -j ACCEPT
+            done
+        else
+            # --- LEGACY POLICY MODE ---
+            echo "Configuring Policy Firewall for $name..."
+            # (Keep your basic NAT/Forward logic for non-VTI connections)
+            IFS=',' read -ra R_SUBNETS <<< "$right_sub"
+            for subnet in "${R_SUBNETS[@]}"; do
+                 iptables -t nat -A ${CHAIN_NAT} -d "$subnet" -j ACCEPT
+                 iptables -t nat -A ${CHAIN_NAT} -s "$subnet" -o "$OUT_INTERFACE" -j MASQUERADE
+                 iptables -A ${CHAIN_FORWARD} -s "$subnet" -j ACCEPT
+                 iptables -A ${CHAIN_FORWARD} -d "$subnet" -j ACCEPT
+            done
+
+            # Basic MSS Clamping fallback for Legacy Mode
+            iptables -t mangle -A FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1360 2>/dev/null || true
+        fi
+    done <<< "$CONFIG_DATA"
 }
 
 # --- Main Execution ---
 if [ -n "$IPTABLES_MOCK_LOG" ]; then
-  cleanup_firewall
-  create_chains
-  add_firewall_rules
-  exit 0
+    cleanup_firewall
+    create_chains
+    apply_firewall
+    exit 0
 fi
+
+trap 'shutdown' TERM INT
+shutdown() {
+    echo "Shutting down..."
+    cleanup_firewall
+    # Cleanup VTIs
+    ip tunnel show | grep vti | awk -F: '{print $1}' | while read intf; do ip link del $intf; done
+    if [ -n "$IPSEC_PID" ]; then kill "$IPSEC_PID"; fi
+    exit 0
+}
 
 cleanup_firewall
 create_chains
-add_firewall_rules
+apply_firewall
 
-shutdown() {
-  echo "Shutting down strongSwan..."
-  cleanup_firewall
-
-  if [ -n "$IPSEC_PID" ]; then
-    kill "$IPSEC_PID"
-  fi
-  ipsec stop >> "$LOG_FILE" 2>&1
-  exit 0
-}
-
-trap 'shutdown' TERM INT
-
-echo "Starting strongSwan daemon in the background..."
+echo "Starting strongSwan..."
 ipsec start --nofork > "$LOG_FILE" 2>&1 &
 IPSEC_PID=$!
 
 sleep 5
 
-CONN_NAMES=$(awk '
-    /conn %default/ {next}
-    /conn/ { conn_name = $2; auto_start = 0; }
-    /auto=start/ { auto_start = 1; }
-    /^$/ { if (!auto_start && conn_name != "") { print conn_name; } conn_name = ""; }
-    END { if (!auto_start && conn_name != "") { print conn_name; } }
-' /etc/ipsec.conf)
+# Start connections
+while IFS=';' read -r name mark rest; do
+    if [ -z "$name" ]; then continue; fi
+    echo "Bringing up connection: $name"
+    ipsec up "$name" >/dev/null 2>&1 || true
+done <<< "$CONFIG_DATA"
 
-if [ -z "$CONN_NAMES" ]; then
-  echo "Warning: No connections found to automatically start."
-else
-  echo "Found connections to automatically start:"
-  for conn in $CONN_NAMES; do
-    echo "- $conn"
-  done
-  echo "---"
-  for conn in $CONN_NAMES; do
-    echo "--> Attempting to bring up tunnel: $conn"
-    ipsec up "$conn"
-  done
-fi
-
-# Start the route monitor in background
-monitor_routes &
-MONITOR_PID=$!
-
-echo "Initialization complete. Container is running and will stay alive."
-
+echo "Initialization complete."
 tail -f "$LOG_FILE" &
-
 wait "$IPSEC_PID"
