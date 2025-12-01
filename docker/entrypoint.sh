@@ -12,6 +12,17 @@ echo "-----------------------------------------"
 echo "Enabling IP Forwarding..."
 sysctl -w net.ipv4.ip_forward=1 || echo "Warning: Could not set ip_forward"
 
+# --- PERFORMANCE TUNING (CRITICAL FOR 10GbE) ---
+echo "Tuning Kernel Network Buffers for High Speed IPsec..."
+# Default buffers are often too small for multi-stream 10GbE IPsec, causing stalls on -P > 2
+sysctl -w net.core.rmem_default=1048576 || true
+sysctl -w net.core.wmem_default=1048576 || true
+sysctl -w net.core.rmem_max=16777216 || true
+sysctl -w net.core.wmem_max=16777216 || true
+sysctl -w net.ipv4.tcp_rmem='4096 87380 16777216' || true
+sysctl -w net.ipv4.tcp_wmem='4096 87380 16777216' || true
+sysctl -w net.core.netdev_max_backlog=5000 || true
+
 LOG_FILE="/var/log/strongswan.log"
 
 # --- DYNAMIC CONFIGURATION PARSING ---
@@ -150,7 +161,8 @@ monitor_legacy_routes() {
                  ip route change table ${TABLE_NUM} $route mtu 1400 || true
             fi
         done
-        sleep 5
+        # Sleep reduced to 2s to catch routes faster before large packets are sent
+        sleep 2
     done
 }
 
@@ -195,10 +207,11 @@ apply_firewall() {
             done
 
             # MSS Clamping for Legacy Mode
+            # Reduced to 1280 (IPv6 min) to be ultra-safe against all overheads
             # 1. FORWARD: Traffic passing through
-            iptables -t mangle -A FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1360 2>/dev/null || true
+            iptables -t mangle -A FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1280 2>/dev/null || true
             # 2. OUTPUT: Local traffic (CRITICAL: Fixes iperf from the NAS itself)
-            iptables -t mangle -A OUTPUT  -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1360 2>/dev/null || true
+            iptables -t mangle -A OUTPUT  -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1280 2>/dev/null || true
         fi
     done <<< "$CONFIG_DATA"
 
