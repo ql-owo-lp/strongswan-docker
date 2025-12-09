@@ -115,6 +115,11 @@ cleanup_firewall() {
   iptables -X ${CHAIN_FORWARD} 2>/dev/null || true
 }
 
+cleanup_routes() {
+    echo "Cleaning up routes in table ${TABLE_NUM}..."
+    ip route flush table ${TABLE_NUM} 2>/dev/null || true
+}
+
 setup_vti() {
     local mark=$1
     local local_ip=$2
@@ -158,7 +163,9 @@ monitor_legacy_routes() {
                  dst=$(echo "$route" | awk '{print $1}')
                  echo "Fixing MTU for legacy route: $dst in table ${TABLE_NUM}"
                  # We simply re-add the route with the correct MTU, which updates it
-                 ip route change table ${TABLE_NUM} $route mtu 1400 || true
+                 if ! ip route change table ${TABLE_NUM} $route mtu 1400; then
+                     echo "Error changing route: $route"
+                 fi
             fi
         done
         # Sleep reduced to 2s to catch routes faster before large packets are sent
@@ -233,6 +240,7 @@ trap 'shutdown' TERM INT
 shutdown() {
     echo "Shutting down..."
     cleanup_firewall
+    cleanup_routes
     # Cleanup VTIs
     ip tunnel show | grep vti | awk -F: '{print $1}' | while read intf; do ip link del $intf; done
     if [ -n "$IPSEC_PID" ]; then kill "$IPSEC_PID"; fi
@@ -240,6 +248,7 @@ shutdown() {
 }
 
 cleanup_firewall
+cleanup_routes
 create_chains
 apply_firewall
 
