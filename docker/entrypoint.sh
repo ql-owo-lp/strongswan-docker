@@ -3,6 +3,12 @@ set -e
 
 # --- Diagnostic Logging ---
 echo "--- Initializing strongSwan Container (VTI & Legacy Dual-Mode) ---"
+
+# --- CLEANUP LEFTOVERS ---
+echo "Cleaning up leftover IPsec state/policies..."
+ip xfrm state flush || echo "Warning: Failed to flush xfrm state"
+ip xfrm policy flush || echo "Warning: Failed to flush xfrm policy"
+
 echo "Detecting iptables version..."
 echo "iptables binary: $(command -v iptables || echo 'Not found')"
 iptables --version
