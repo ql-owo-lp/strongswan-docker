@@ -46,3 +46,4 @@ services:
       - VPN_SUBNET=10.10.0.0/24
       - OUT_INTERFACE=eth0
       - IPV6_ENABLE=false
+      - FLUSH_POLICY_ON_START=false
