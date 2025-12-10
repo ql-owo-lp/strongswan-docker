@@ -5,9 +5,14 @@ set -e
 echo "--- Initializing strongSwan Container (VTI & Legacy Dual-Mode) ---"
 
 # --- CLEANUP LEFTOVERS ---
-echo "Cleaning up leftover IPsec state/policies..."
-ip xfrm state flush || echo "Warning: Failed to flush xfrm state"
-ip xfrm policy flush || echo "Warning: Failed to flush xfrm policy"
+FLUSH_POLICY_ON_START=${FLUSH_POLICY_ON_START:-false}
+if [ "$FLUSH_POLICY_ON_START" == "true" ]; then
+    echo "Cleaning up leftover IPsec state/policies (FLUSH_POLICY_ON_START=true)..."
+    ip xfrm state flush || echo "Warning: Failed to flush xfrm state"
+    ip xfrm policy flush || echo "Warning: Failed to flush xfrm policy"
+else
+    echo "Skipping cleanup of leftover IPsec state/policies (FLUSH_POLICY_ON_START=$FLUSH_POLICY_ON_START)"
+fi
 
 echo "Detecting iptables version..."
 echo "iptables binary: $(command -v iptables || echo 'Not found')"
