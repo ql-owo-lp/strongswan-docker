@@ -187,8 +187,8 @@ setup_vti() {
     # Add routing for remote subnets
     IFS=',' read -ra SUBNETS <<< "$4"
     for subnet in "${SUBNETS[@]}"; do
-        echo "  -> Routing $subnet via $vti_name"
-        ip route add "$subnet" dev "$vti_name"
+        echo "  -> Routing $subnet via $vti_name (metric $mark)"
+        ip route add "$subnet" dev "$vti_name" metric "$mark"
     done
 }
 

@@ -1,0 +1,24 @@
+name: Integration Tests
+
+on:
+  push:
+    branches: [ "master", "main" ]
+  pull_request:
+    branches: [ "master", "main" ]
+
+jobs:
+  integration-test:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v3
+
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v2
+
+    - name: Make entrypoint executable (Fix for permissions)
+      run: chmod +x docker/entrypoint.sh
+
+    - name: Run Integration Tests
+      run: |
+        chmod +x tests/integration/run_integration_tests.sh
+        sudo ./tests/integration/run_integration_tests.sh
