@@ -3,17 +3,6 @@ set -e
 
 # --- Diagnostic Logging ---
 echo "--- Initializing strongSwan Container (VTI & Legacy Dual-Mode) ---"
-
-# --- CLEANUP LEFTOVERS ---
-FLUSH_POLICY_ON_START=${FLUSH_POLICY_ON_START:-false}
-if [ "$FLUSH_POLICY_ON_START" == "true" ]; then
-    echo "Cleaning up leftover IPsec state/policies (FLUSH_POLICY_ON_START=true)..."
-    ip xfrm state flush || echo "Warning: Failed to flush xfrm state"
-    ip xfrm policy flush || echo "Warning: Failed to flush xfrm policy"
-else
-    echo "Skipping cleanup of leftover IPsec state/policies (FLUSH_POLICY_ON_START=$FLUSH_POLICY_ON_START)"
-fi
-
 echo "Detecting iptables version..."
 echo "iptables binary: $(command -v iptables || echo 'Not found')"
 iptables --version
@@ -47,6 +36,27 @@ fi
 # Default to 220 if not found or empty
 TABLE_NUM=${TABLE_NUM:-220}
 echo "Using Routing Table: ${TABLE_NUM}"
+
+# --- CLEANUP LEFTOVERS ---
+FLUSH_POLICY_ON_START=${FLUSH_POLICY_ON_START:-false}
+if [ "$FLUSH_POLICY_ON_START" == "true" ]; then
+    echo "Cleaning up leftovers (FLUSH_POLICY_ON_START=true)..."
+
+    echo "  -> Flushing IPsec state/policies..."
+    ip xfrm state flush || echo "Warning: Failed to flush xfrm state"
+    ip xfrm policy flush || echo "Warning: Failed to flush xfrm policy"
+
+    echo "  -> Flushing routing table ${TABLE_NUM}..."
+    ip route flush table ${TABLE_NUM} || echo "Warning: Failed to flush table ${TABLE_NUM}"
+
+    echo "  -> Deleting existing VTI interfaces..."
+    ip tunnel show | grep vti | awk -F: '{print $1}' | while read intf; do
+        echo "     Deleting $intf"
+        ip link del $intf || echo "Warning: Failed to delete $intf"
+    done
+else
+    echo "Skipping cleanup of leftovers (FLUSH_POLICY_ON_START=$FLUSH_POLICY_ON_START)"
+fi
 
 # --- IPv6 Configuration ---
 IPV6_ENABLE=${IPV6_ENABLE:-false}
