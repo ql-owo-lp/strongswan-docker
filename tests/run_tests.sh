@@ -92,7 +92,7 @@ if ! grep -q "iptables -t nat -A ${CHAIN_NAT} -d 10.10.1.0/24 -j ACCEPT" ${IPTAB
 fi
 
 # MSS Clamping Rule (Legacy)
-if ! grep -q "iptables -t mangle -A FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1360" ${IPTABLES_MOCK_LOG}; then
+if ! grep -q "iptables -t mangle -A FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1280" ${IPTABLES_MOCK_LOG}; then
   echo "FAIL: TCPMSS rule for legacy mode not found!"
   exit 1
 fi
