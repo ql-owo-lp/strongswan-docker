@@ -37,6 +37,28 @@ fi
 TABLE_NUM=${TABLE_NUM:-220}
 echo "Using Routing Table: ${TABLE_NUM}"
 
+# --- IPv6 Configuration ---
+IPV6_ENABLE=${IPV6_ENABLE:-false}
+if [ "$IPV6_ENABLE" != "true" ]; then
+    echo "IPv6 disabled (IPV6_ENABLE!=true). Configuring strongSwan to ignore IPv6..."
+    if ! grep -q "socket-default {" /etc/strongswan.conf || ! grep -q "use_ipv6 = no" /etc/strongswan.conf; then
+        cat <<EOF >> /etc/strongswan.conf
+
+charon {
+    plugins {
+        socket-default {
+            use_ipv6 = no
+        }
+    }
+}
+EOF
+    else
+        echo "IPv6 disable config already present in /etc/strongswan.conf"
+    fi
+else
+    echo "IPv6 enabled (IPV6_ENABLE=true)."
+fi
+
 # --- CONFIGURATION PARSER ---
 # This script extracts connections and their VTI parameters (mark, left, right, subnets)
 # Format output: CONN_NAME;MARK;LEFT_IP;RIGHT_IP;LOCAL_SUBNETS;REMOTE_SUBNETS
