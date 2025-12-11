@@ -36,21 +36,34 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# --- CLI Argument Parsing ---
+SCENARIO="${1:-VTI}" # Default to VTI
+
+log "Running Scenario: $SCENARIO"
+
 # --- Setup ---
 setup() {
     log "Building Docker image..."
     # Build locally for testing (skip push)
     docker build -t $IMAGE_NAME ./docker
 
-
     log "Creating Docker Network ($TEST_NET)..."
     docker network create --subnet=172.20.0.0/16 $TEST_NET >/dev/null 2>&1 || true
+
+    # Select Configs based on Scenario
+    if [ "$SCENARIO" == "POLICY" ]; then
+        SERVER_CONF="$(pwd)/tests/integration/server/ipsec.policy.conf"
+        CLIENT_CONF="$(pwd)/tests/integration/client/ipsec.policy.conf"
+    else
+        SERVER_CONF="$(pwd)/tests/integration/server/ipsec.conf"
+        CLIENT_CONF="$(pwd)/tests/integration/client/ipsec.conf"
+    fi
 
     log "Starting Server Container ($SERVER_NAME)..."
     docker run -d --name $SERVER_NAME \
         --net $TEST_NET --ip $SERVER_IP \
         --privileged \
-        -v "$(pwd)/tests/integration/server/ipsec.conf:/etc/ipsec.conf" \
+        -v "$SERVER_CONF:/etc/ipsec.conf" \
         -v "$(pwd)/tests/integration/server/ipsec.secrets:/etc/ipsec.secrets" \
         -v "$(pwd)/docker/entrypoint.sh:/entrypoint.sh" \
         -e OUT_INTERFACE=eth0 \
@@ -68,7 +81,7 @@ setup() {
     docker run -d --name $CLIENT_NAME \
         --net $TEST_NET --ip $CLIENT_IP \
         --privileged \
-        -v "$(pwd)/tests/integration/client/ipsec.conf:/etc/ipsec.conf" \
+        -v "$CLIENT_CONF:/etc/ipsec.conf" \
         -v "$(pwd)/tests/integration/client/ipsec.secrets:/etc/ipsec.secrets" \
         -v "$(pwd)/docker/entrypoint.sh:/entrypoint.sh" \
         -e OUT_INTERFACE=eth0 \
@@ -159,10 +172,17 @@ test_recovery() {
 
 # --- Main ---
 setup
-wait_for_connection $CLIENT_NAME "net-1"
-wait_for_connection $CLIENT_NAME "net-2"
-test_connectivity
-test_redundancy
-test_recovery
+
+if [ "$SCENARIO" == "POLICY" ]; then
+    wait_for_connection $CLIENT_NAME "net-policy"
+    test_connectivity
+    # Policy test has only one connection currently
+else
+    wait_for_connection $CLIENT_NAME "net-1"
+    wait_for_connection $CLIENT_NAME "net-2"
+    test_connectivity
+    test_redundancy
+    test_recovery
+fi
 
 log "ALL TESTS PASSED."
