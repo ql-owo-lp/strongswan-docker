@@ -30,6 +30,17 @@ It will then automatically generate the appropriate `iptables` rules to allow tr
 
 If the script cannot find any suitable connections in your `ipsec.conf`, it will fall back to using the environment variables or the default values.
 
+### Custom Tunnels
+You can define additional tunnel interfaces (independent of ipsec.conf parsing) using the `EXTRA_TUNNELS` environment variable. This is useful for GRE, IPIP, or manual VTI configurations.
+
+**Format**: `ifname:mode:local:remote:key` (space-separated)
+
+**Example**:
+```yaml
+environment:
+  - EXTRA_TUNNELS=gre1:gre:1.2.3.4:5.6.7.8:100 vti50:vti:1.2.3.4:5.6.7.9:50
+```
+
 ### strongSwan Configuration
 
 The container includes a default `strongswan.conf` file with the following settings:

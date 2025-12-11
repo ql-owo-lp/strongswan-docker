@@ -54,19 +54,42 @@ setup() {
     if [ "$SCENARIO" == "POLICY" ]; then
         SERVER_CONF="$(pwd)/tests/integration/server/ipsec.policy.conf"
         CLIENT_CONF="$(pwd)/tests/integration/client/ipsec.policy.conf"
+    elif [ "$SCENARIO" == "BGP" ]; then
+        SERVER_CONF="$(pwd)/tests/integration/server/ipsec.conf"
+        CLIENT_CONF="$(pwd)/tests/integration/client/ipsec.conf"
+        # FRR Configs
+        SERVER_FRR="$(pwd)/tests/integration/server/frr.conf"
+        CLIENT_FRR="$(pwd)/tests/integration/client/frr.conf"
+    elif [ "$SCENARIO" == "GRE" ]; then
+        # Use Policy mode for IPsec (encrypting GRE) or just VTI... 
+        # Actually GRE usually rides over Transport mode or VTI. 
+        # For simplicity, let's use the policy-based IPsec config but ADD GRE tunnels via env var.
+        SERVER_CONF="$(pwd)/tests/integration/server/ipsec.policy.conf"
+        CLIENT_CONF="$(pwd)/tests/integration/client/ipsec.policy.conf"
     else
         SERVER_CONF="$(pwd)/tests/integration/server/ipsec.conf"
         CLIENT_CONF="$(pwd)/tests/integration/client/ipsec.conf"
     fi
 
     log "Starting Server Container ($SERVER_NAME)..."
+    SERVER_ENV=""
+    if [ "$SCENARIO" == "GRE" ]; then
+        SERVER_ENV="-e EXTRA_TUNNELS=gre1:gre:172.20.0.10:172.20.0.20"
+    fi
+    SERVER_FRR_MOUNT=""
+    if [ -n "$SERVER_FRR" ]; then
+        SERVER_FRR_MOUNT="-v $SERVER_FRR:/etc/frr/frr.conf"
+    fi
+
     docker run -d --name $SERVER_NAME \
         --net $TEST_NET --ip $SERVER_IP \
         --privileged \
         -v "$SERVER_CONF:/etc/ipsec.conf" \
+        $SERVER_FRR_MOUNT \
         -v "$(pwd)/tests/integration/server/ipsec.secrets:/etc/ipsec.secrets" \
         -v "$(pwd)/docker/entrypoint.sh:/entrypoint.sh" \
         -e OUT_INTERFACE=eth0 \
+        $SERVER_ENV \
         --entrypoint tail \
         $IMAGE_NAME -f /dev/null
 
@@ -78,13 +101,24 @@ setup() {
     docker exec -d $SERVER_NAME /entrypoint.sh
 
     log "Starting Client Container ($CLIENT_NAME)..."
+    CLIENT_ENV=""
+    if [ "$SCENARIO" == "GRE" ]; then
+        CLIENT_ENV="-e EXTRA_TUNNELS=gre1:gre:172.20.0.20:172.20.0.10"
+    fi
+    CLIENT_FRR_MOUNT=""
+    if [ -n "$CLIENT_FRR" ]; then
+        CLIENT_FRR_MOUNT="-v $CLIENT_FRR:/etc/frr/frr.conf"
+    fi
+
     docker run -d --name $CLIENT_NAME \
         --net $TEST_NET --ip $CLIENT_IP \
         --privileged \
         -v "$CLIENT_CONF:/etc/ipsec.conf" \
+        $CLIENT_FRR_MOUNT \
         -v "$(pwd)/tests/integration/client/ipsec.secrets:/etc/ipsec.secrets" \
         -v "$(pwd)/docker/entrypoint.sh:/entrypoint.sh" \
         -e OUT_INTERFACE=eth0 \
+        $CLIENT_ENV \
         $IMAGE_NAME
 
     log "Installing iperf3..."
@@ -135,9 +169,17 @@ test_connectivity() {
     docker exec -d $SERVER_NAME iperf3 -s
     sleep 2
     if docker exec $CLIENT_NAME iperf3 -c 10.10.0.1 -B 192.168.0.1 -t 5; then
-         log "iperf3 Test PASSED!"
+         log "TCP iperf3 Test PASSED!"
     else
-         error "iperf3 Test FAILED!"
+         error "TCP iperf3 Test FAILED!"
+         return 1
+    fi
+
+    log "Testing UDP (iperf3)..."
+    if docker exec $CLIENT_NAME iperf3 -c 10.10.0.1 -B 192.168.0.1 -u -b 10M -t 5; then
+         log "UDP iperf3 Test PASSED!"
+    else
+         error "UDP iperf3 Test FAILED!"
          return 1
     fi
 }
@@ -197,6 +239,50 @@ test_hard_recovery() {
     fi
 }
 
+test_bgp() {
+    log "Testing BGP Session Establishment..."
+    
+    # Wait for BGP to establish
+    local established=false
+    for i in $(seq 1 30); do
+        if docker exec $CLIENT_NAME vtysh -c "show ip bgp summary" | grep -q "Established"; then
+            log "BGP Session ESTABLISHED (Client side)!"
+            established=true
+            break
+        fi
+        sleep 2
+    done
+    
+    if [ "$established" != "true" ]; then
+        error "BGP Session failed to establish."
+        docker exec $CLIENT_NAME vtysh -c "show ip bgp summary"
+        return 1
+    fi
+    
+    log "Verifying BGP Routes..."
+    sleep 5
+    
+    # Client should learn 10.10.0.0/16 from Server
+    if docker exec $CLIENT_NAME ip route | grep -q "10.10.0.0/16 proto bgp"; then
+        log "Client learned Server subnet (10.10.0.0/16) via BGP!"
+    else
+        error "Client failed to learn Server subnet via BGP."
+        docker exec $CLIENT_NAME ip route
+        return 1
+    fi
+    
+    # Server should learn 192.168.0.0/16 from Client
+    if docker exec $SERVER_NAME ip route | grep -q "192.168.0.0/16 proto bgp"; then
+        log "Server learned Client subnet (192.168.0.0/16) via BGP!"
+    else
+        error "Server failed to learn Client subnet via BGP."
+        docker exec $SERVER_NAME ip route
+        return 1
+    fi
+    
+    log "BGP Test PASSED!"
+}
+
 # --- Main ---
 setup
 
@@ -204,6 +290,34 @@ if [ "$SCENARIO" == "POLICY" ]; then
     wait_for_connection $CLIENT_NAME "net-policy"
     test_connectivity
     # Policy test has only one connection currently
+elif [ "$SCENARIO" == "BGP" ]; then
+    wait_for_connection $CLIENT_NAME "net-1"
+    
+    # Enable dummy interfaces for BGP to advertise
+    log "Adding dummy interface to Client for BGP advertisement..."
+    docker exec $CLIENT_NAME ip addr add 192.168.0.1/32 dev eth0 || true
+    log "Adding dummy interface to Server for BGP advertisement..."
+    docker exec $SERVER_NAME ip addr add 10.10.0.1/32 dev eth0 || true
+    
+    test_bgp
+elif [ "$SCENARIO" == "GRE" ]; then
+    wait_for_connection $CLIENT_NAME "net-policy"
+    
+    log "Testing GRE Tunnel..."
+    # Assign IPs to GRE interfaces
+    log "Assigning IPs to GRE interfaces..."
+    docker exec $SERVER_NAME ip addr add 10.200.0.1/30 dev gre1
+    docker exec $SERVER_NAME ip link set gre1 up
+    docker exec $CLIENT_NAME ip addr add 10.200.0.2/30 dev gre1
+    docker exec $CLIENT_NAME ip link set gre1 up
+    
+    log "Pinging over GRE..."
+    if docker exec $CLIENT_NAME ping -c 3 10.200.0.1; then
+        log "GRE Ping PASSED!"
+    else
+        error "GRE Ping FAILED!"
+        return 1
+    fi
 else
     wait_for_connection $CLIENT_NAME "net-1"
     wait_for_connection $CLIENT_NAME "net-2"

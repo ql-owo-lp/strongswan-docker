@@ -274,6 +274,45 @@ apply_firewall() {
         fi
     done <<< "$CONFIG_DATA"
 
+    # --- EXTRA_TUNNELS Support ---
+    # Format: ifname:mode:local:remote:key
+    # Example: gre1:gre:1.2.3.4:5.6.7.8:100
+    if [ -n "$EXTRA_TUNNELS" ]; then
+        echo "Configuring Extra Tunnels..."
+        for tunnel in $EXTRA_TUNNELS; do
+            IFS=':' read -r ifname mode local remote key <<< "$tunnel"
+            if [ -z "$ifname" ] || [ -z "$mode" ] || [ -z "$local" ] || [ -z "$remote" ]; then
+                echo "Warning: Invalid EXTRA_TUNNELS format: $tunnel"
+                continue
+            fi
+            
+            echo "Creating Extra Tunnel: $ifname ($mode) local $local remote $remote key $key"
+            
+            if ip link show "$ifname" >/dev/null 2>&1; then
+                echo "Interface $ifname already exists, resetting..."
+                ip link del "$ifname"
+            fi
+            
+            # Build command args
+            cmd="ip tunnel add $ifname mode $mode local $local remote $remote"
+            if [ -n "$key" ] && [ "$key" != "0" ]; then
+                cmd="$cmd key $key"
+            fi
+            
+            # Execute creation
+            $cmd
+            ip link set "$ifname" up mtu 1400
+            
+            # Allow forwarding
+            iptables -A ${CHAIN_FORWARD} -i "$ifname" -j ACCEPT
+            iptables -A ${CHAIN_FORWARD} -o "$ifname" -j ACCEPT
+            
+            # Disable policy on interface (useful for VTI/GRE protected by IPsec)
+            sysctl -w "net.ipv4.conf.${ifname}.disable_policy=1" >/dev/null || true
+        done
+    fi
+
+
     # Start Route Monitor if we have legacy connections
     if [ "$legacy_active" -eq 1 ]; then
         monitor_legacy_routes &
@@ -296,7 +335,63 @@ shutdown() {
     cleanup_xfrm
     cleanup_vtis
     if [ -n "$IPSEC_PID" ]; then kill "$IPSEC_PID"; fi
+    if [ -f /var/run/frr/bgpd.pid ]; then kill $(cat /var/run/frr/bgpd.pid) 2>/dev/null || true; fi
+    if [ -f /var/run/frr/zebra.pid ]; then kill $(cat /var/run/frr/zebra.pid) 2>/dev/null || true; fi
     exit 0
+}
+
+start_frr() {
+    if [ -f /etc/frr/frr.conf ] || [ -f /etc/frr/bgpd.conf ]; then
+        echo "Starting FRR (Zebra & BGPd)..."
+        install -d -m 755 -o frr -g frr /var/run/frr
+        
+        # Add root to frr/frrvty group to allow vtysh access
+        addgroup root frr 2>/dev/null || true
+        addgroup root frrvty 2>/dev/null || true
+        
+        # Ensure daemons file exists and enable bgpd if not present
+        if [ ! -f /etc/frr/daemons ]; then
+             echo "Creating default /etc/frr/daemons..."
+             cat <<EOF > /etc/frr/daemons
+bgpd=yes
+ospfd=yes
+ospf6d=no
+ripd=no
+ripngd=no
+isisd=no
+pimd=no
+ldpd=no
+nhrpd=no
+eigrpd=no
+babeld=no
+sharpd=no
+pbrd=no
+bfdd=no
+fabricd=no
+vrrpd=no
+pathd=no
+EOF
+             chown frr:frr /etc/frr/daemons
+        fi
+        
+        # Ensure vtysh.conf exists
+        if [ ! -f /etc/frr/vtysh.conf ]; then
+            echo "Creating default /etc/frr/vtysh.conf..."
+            echo "service integrated-vtysh-config" > /etc/frr/vtysh.conf
+            chown frr:frrvty /etc/frr/vtysh.conf
+        fi
+        
+        # Ensure config is readable by frr
+        if [ -f /etc/frr/frr.conf ]; then
+            chown frr:frr /etc/frr/frr.conf
+            chmod 640 /etc/frr/frr.conf
+        fi
+        
+        /usr/lib/frr/zebra -d -A 127.0.0.1 -f /etc/frr/frr.conf
+        /usr/lib/frr/bgpd -d -A 127.0.0.1 -f /etc/frr/frr.conf
+    else
+        echo "No FRR configuration found (/etc/frr/frr.conf). Skipping BGP/OSPF."
+    fi
 }
 
 cleanup_firewall
@@ -307,6 +402,9 @@ apply_firewall
 echo "Starting strongSwan..."
 ipsec start --nofork > "$LOG_FILE" 2>&1 &
 IPSEC_PID=$!
+
+# Start FRR if configured
+start_frr
 
 sleep 5
 

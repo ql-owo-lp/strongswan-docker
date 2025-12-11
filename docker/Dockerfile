@@ -14,10 +14,11 @@ FROM mirror.gcr.io/library/alpine:${ALPINE_VERSION}
 RUN apk update && \
     apk add --no-cache \
         strongswan \
-        bash \
         iproute2 \
         iptables \
-        gawk && \
+        gawk \
+        openssl \
+        frr && \
     rm -rf /var/cache/apk/*
 
 # --- Configuration ---

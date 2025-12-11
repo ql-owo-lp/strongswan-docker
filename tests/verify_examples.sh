@@ -23,6 +23,11 @@ verify_config() {
     local config_file=$1
     local config_name=$(basename "$config_file")
     
+    # Skip non-ipsec configs
+    if [[ "$config_name" == "frr.conf" ]]; then
+        return
+    fi
+    
     log "Verifying configuration: $config_name"
     
     # Create a dummy secrets file if needed
@@ -69,6 +74,44 @@ verify_config() {
     cleanup
 }
 
+verify_frr() {
+    log "Verifying FRR Configuration (BGP/OSPF)..."
+    local config_file="$EXAMPLES_DIR/vti-based.conf"
+    local frr_conf="$EXAMPLES_DIR/frr.conf"
+    
+    touch /tmp/dummy.secrets
+    
+    docker run -d --name $CONTAINER_NAME \
+        --privileged \
+        -v "$config_file:/etc/ipsec.conf" \
+        -v "$frr_conf:/etc/frr/frr.conf" \
+        -v "/tmp/dummy.secrets:/etc/ipsec.secrets" \
+        -v "$(pwd)/docker/entrypoint.sh:/entrypoint.sh" \
+        -e OUT_INTERFACE=eth0 \
+        $IMAGE_NAME >/dev/null
+        
+    sleep 5
+    
+    if docker exec $CONTAINER_NAME ps | grep -q "zebra"; then
+        log "Zebra is running."
+    else
+        error "Zebra failed to start."
+        docker logs $CONTAINER_NAME
+        return 1
+    fi
+    
+    if docker exec $CONTAINER_NAME ps | grep -q "bgpd"; then
+        log "BGPd is running."
+    else
+        error "BGPd failed to start."
+        docker logs $CONTAINER_NAME
+        return 1
+    fi
+    
+    log "FRR verification passed."
+    cleanup
+}
+
 # Build image
 log "Building image..."
 docker build -t $IMAGE_NAME ./docker >/dev/null
@@ -78,4 +121,7 @@ for conf in $EXAMPLES_DIR/*.conf; do
     verify_config "$conf"
 done
 
-log "All examples verified!"
+# Verify FRR
+verify_frr
+
+log "All examples and FRR verified!"
