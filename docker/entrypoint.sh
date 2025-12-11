@@ -15,13 +15,13 @@ sysctl -w net.ipv4.ip_forward=1 || echo "Warning: Could not set ip_forward"
 # --- PERFORMANCE TUNING (CRITICAL FOR 10GbE) ---
 echo "Tuning Kernel Network Buffers for High Speed IPsec..."
 # Default buffers are often too small for multi-stream 10GbE IPsec, causing stalls on -P > 2
-sysctl -w net.core.rmem_default=1048576 || true
-sysctl -w net.core.wmem_default=1048576 || true
-sysctl -w net.core.rmem_max=16777216 || true
-sysctl -w net.core.wmem_max=16777216 || true
-sysctl -w net.ipv4.tcp_rmem='4096 87380 16777216' || true
-sysctl -w net.ipv4.tcp_wmem='4096 87380 16777216' || true
-sysctl -w net.core.netdev_max_backlog=5000 || true
+sysctl -w net.core.rmem_default=1048576 || echo "Warning: Failed to set net.core.rmem_default"
+sysctl -w net.core.wmem_default=1048576 || echo "Warning: Failed to set net.core.wmem_default"
+sysctl -w net.core.rmem_max=16777216 || echo "Warning: Failed to set net.core.rmem_max"
+sysctl -w net.core.wmem_max=16777216 || echo "Warning: Failed to set net.core.wmem_max"
+sysctl -w net.ipv4.tcp_rmem='4096 87380 16777216' || echo "Warning: Failed to set net.ipv4.tcp_rmem"
+sysctl -w net.ipv4.tcp_wmem='4096 87380 16777216' || echo "Warning: Failed to set net.ipv4.tcp_wmem"
+sysctl -w net.core.netdev_max_backlog=5000 || echo "Warning: Failed to set net.core.netdev_max_backlog"
 
 LOG_FILE="/var/log/strongswan.log"
 
@@ -38,22 +38,30 @@ TABLE_NUM=${TABLE_NUM:-220}
 echo "Using Routing Table: ${TABLE_NUM}"
 
 # --- CLEANUP LEFTOVERS ---
-FLUSH_POLICY_ON_START=${FLUSH_POLICY_ON_START:-false}
-if [ "$FLUSH_POLICY_ON_START" == "true" ]; then
-    echo "Cleaning up leftovers (FLUSH_POLICY_ON_START=true)..."
+FLUSH_POLICY_ON_START=${FLUSH_POLICY_ON_START:-true}
 
-    echo "  -> Flushing IPsec state/policies..."
+cleanup_xfrm() {
+    echo "Cleaning up XFRM state/policies..."
     ip xfrm state flush || echo "Warning: Failed to flush xfrm state"
     ip xfrm policy flush || echo "Warning: Failed to flush xfrm policy"
+}
 
-    echo "  -> Flushing routing table ${TABLE_NUM}..."
-    ip route flush table ${TABLE_NUM} || echo "Warning: Failed to flush table ${TABLE_NUM}"
-
-    echo "  -> Deleting existing VTI interfaces..."
+cleanup_vtis() {
+    echo "Deleting existing VTI interfaces..."
     ip tunnel show | grep vti | awk -F: '{print $1}' | while read intf; do
         echo "     Deleting $intf"
         ip link del $intf || echo "Warning: Failed to delete $intf"
     done
+}
+
+if [ "$FLUSH_POLICY_ON_START" == "true" ]; then
+    echo "Cleaning up leftovers (FLUSH_POLICY_ON_START=true)..."
+    cleanup_xfrm
+    
+    echo "  -> Flushing routing table ${TABLE_NUM}..."
+    ip route flush table ${TABLE_NUM} || echo "Warning: Failed to flush table ${TABLE_NUM}"
+    
+    cleanup_vtis
 else
     echo "Skipping cleanup of leftovers (FLUSH_POLICY_ON_START=$FLUSH_POLICY_ON_START)"
 fi
@@ -182,7 +190,8 @@ setup_vti() {
     ip link set "$vti_name" up mtu "$vti_mtu"
 
     # Disable policy lookup on the VTI interface itself
-    sysctl -w "net.ipv4.conf.${vti_name}.disable_policy=1" >/dev/null
+    # Disable policy lookup on the VTI interface itself
+    sysctl -w "net.ipv4.conf.${vti_name}.disable_policy=1" >/dev/null || echo "Warning: Failed to disable policy on $vti_name"
 
     # Add routing for remote subnets
     IFS=',' read -ra SUBNETS <<< "$4"
@@ -284,8 +293,8 @@ shutdown() {
     echo "Shutting down..."
     cleanup_firewall
     cleanup_routes
-    # Cleanup VTIs
-    ip tunnel show | grep vti | awk -F: '{print $1}' | while read intf; do ip link del $intf; done
+    cleanup_xfrm
+    cleanup_vtis
     if [ -n "$IPSEC_PID" ]; then kill "$IPSEC_PID"; fi
     exit 0
 }

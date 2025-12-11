@@ -170,6 +170,33 @@ test_recovery() {
     fi
 }
 
+test_hard_recovery() {
+    log "Testing Hard Recovery (Killing Client with SIGKILL)..."
+    docker kill $CLIENT_NAME
+    
+    log "Waiting 2s..."
+    sleep 2
+    
+    log "Starting Client again..."
+    docker start $CLIENT_NAME
+    
+    log "Waiting for Client to recover..."
+    sleep 5
+    
+    # Re-apply dummy IP (lost on restart)
+    docker exec $CLIENT_NAME ip addr add 192.168.0.1/32 dev eth0
+    
+    wait_for_connection $CLIENT_NAME "net-1"
+    
+    log "Retesting connectivity after hard kill..."
+    if docker exec $CLIENT_NAME iperf3 -c 10.10.0.1 -B 192.168.0.1 -t 5; then
+        log "Hard Recovery Test PASSED!"
+    else
+        error "Hard Recovery Test FAILED!"
+        return 1
+    fi
+}
+
 # --- Main ---
 setup
 
@@ -183,6 +210,7 @@ else
     test_connectivity
     test_redundancy
     test_recovery
+    test_hard_recovery
 fi
 
 log "ALL TESTS PASSED."
