@@ -96,10 +96,9 @@ AWK_SCRIPT='
         if (in_conn && auto && left && right) {
             # Default mark to 0 if not set
             if (mark == "") mark="0";
-            print name ";" mark ";" left ";" right ";" left_sub ";" right_sub;
+            print name ";" mark ";" left ";" right ";" left_sub ";" right_sub ";" auto;
         }
-        in_conn = 0; name=""; mark=""; left=""; right=""; left_sub=""; right_sub=""; auto=0;
-    }
+        in_conn = 0; name=""; mark=""; left=""; right=""; left_sub=""; right_sub=""; auto=0;    }
     # Clean up line: remove comments, trim whitespace, compact "=", remove CR
     { sub(/#.*/, ""); gsub(/^[ \t]+|[ \t]+$/, ""); gsub(/[ \t]*=[ \t]*/, "="); gsub(/\r/, ""); }
 
@@ -145,6 +144,14 @@ if [ -z "$OUT_INTERFACE" ]; then
   OUT_INTERFACE=$(ip route | grep default | $AWK_BIN '{print $5}')
 fi
 echo "Physical Interface: $OUT_INTERFACE"
+
+# --- CONFIGURATION INJECTION ---
+echo "Configuring strongSwan to use interface: $OUT_INTERFACE"
+cat <<EOF >> /etc/strongswan.conf
+charon {
+  interfaces_use = $OUT_INTERFACE
+}
+EOF
 
 # --- FIREWALL & VTI SETUP ---
 CHAIN_PREFIX="${IPTABLES_CHAIN_PREFIX:-STRONGSWAN}"
@@ -235,7 +242,7 @@ apply_firewall() {
     local legacy_active=0
 
     # Parse config to generate rules
-    while IFS=';' read -r name mark left right left_sub right_sub; do
+    while IFS=';' read -r name mark left right left_sub right_sub auto; do
         if [ -z "$name" ]; then continue; fi
 
         if [ "$mark" != "0" ]; then
@@ -387,8 +394,13 @@ EOF
             chmod 640 /etc/frr/frr.conf
         fi
         
-        /usr/lib/frr/zebra -d -A 127.0.0.1 -f /etc/frr/frr.conf
-        /usr/lib/frr/bgpd -d -A 127.0.0.1 -f /etc/frr/frr.conf
+        # Cleanup FRR temp files
+        rm -rf /var/tmp/frr/*
+        install -d -m 755 -o frr -g frr /var/tmp/frr
+
+        # Start daemons with FD limit to avoid warnings
+        /usr/lib/frr/zebra -d -A 127.0.0.1 -f /etc/frr/frr.conf --limit-fds 100000
+        /usr/lib/frr/bgpd -d -A 127.0.0.1 -f /etc/frr/frr.conf --limit-fds 100000
     else
         echo "No FRR configuration found (/etc/frr/frr.conf). Skipping BGP/OSPF."
     fi
@@ -409,10 +421,16 @@ start_frr
 sleep 5
 
 # Start connections
-while IFS=';' read -r name mark rest; do
+# Start connections
+while IFS=';' read -r name mark left right left_sub right_sub auto; do
     if [ -z "$name" ]; then continue; fi
-    echo "Bringing up connection: $name"
-    ipsec up "$name" >/dev/null 2>&1 || true
+    # Only bring up if not auto=start (which charon handles automatically)
+    if [ "$auto" != "1" ]; then
+        echo "Bringing up connection: $name"
+        ipsec up "$name" >/dev/null 2>&1 || true
+    else
+        echo "Connection $name is auto=start, skipping explicit up."
+    fi
 done <<< "$CONFIG_DATA"
 
 echo "Initialization complete."
