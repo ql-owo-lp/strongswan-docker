@@ -107,15 +107,20 @@ fi
 
 # --- CONFIGURATION PARSER ---
 # This script extracts connections and their VTI parameters (mark, left, right, subnets)
-# Format output: CONN_NAME;MARK;LEFT_IP;RIGHT_IP;LOCAL_SUBNETS;REMOTE_SUBNETS
+# Format output: CONN_NAME;MARK;LEFT_IP;RIGHT_IP;LOCAL_SUBNETS;REMOTE_SUBNETS;AUTO_MODE
 AWK_SCRIPT='
     function process_conn() {
-        if (in_conn && auto && left && right) {
+        if (in_conn && left && right) {
             # Default mark to 0 if not set
             if (mark == "") mark="0";
-            print name ";" mark ";" left ";" right ";" left_sub ";" right_sub ";" auto;
+
+            # Check if auto_mode is valid
+            if (auto_mode == "start" || auto_mode == "add" || auto_mode == "route") {
+                print name ";" mark ";" left ";" right ";" left_sub ";" right_sub ";" auto_mode;
+            }
         }
-        in_conn = 0; name=""; mark=""; left=""; right=""; left_sub=""; right_sub=""; auto=0;    }
+        in_conn = 0; name=""; mark=""; left=""; right=""; left_sub=""; right_sub=""; auto_mode="";
+    }
     # Clean up line: remove comments, trim whitespace, compact "=", remove CR
     { sub(/#.*/, ""); gsub(/^[ \t]+|[ \t]+$/, ""); gsub(/[ \t]*=[ \t]*/, "="); gsub(/\r/, ""); }
 
@@ -129,7 +134,7 @@ AWK_SCRIPT='
     /^conn / { process_conn(); in_conn=1; name=$2; }
 
     # Parse parameters (splitting by "=")
-    in_conn && /^auto=start/ { auto=1; }
+    in_conn && /^auto=/ { split($0, a, "="); auto_mode=a[2]; }
     in_conn && /^mark=/ { split($0, a, "="); mark=a[2]; }
     in_conn && /^left=/ { split($0, a, "="); left=a[2]; }
     in_conn && /^right=/ { split($0, a, "="); right=a[2]; }
@@ -489,14 +494,17 @@ ipsec status || true
 echo "--------------------------"
 
 # Start connections
-while IFS=';' read -r name mark left right left_sub right_sub auto; do
+while IFS=';' read -r name mark left right left_sub right_sub auto_mode; do
     if [ -z "$name" ]; then continue; fi
-    # Only bring up if not auto=start (which charon handles automatically)
-    if [ "$auto" != "1" ]; then
-        echo "Bringing up connection: $name"
-        ipsec up "$name" >/dev/null 2>&1 || true
+
+    if [ "$auto_mode" == "start" ]; then
+         echo "Connection $name is auto=start, skipping explicit up."
+    elif [ "$auto_mode" == "add" ] || [ "$auto_mode" == "route" ]; then
+         echo "Connection $name is auto=$auto_mode, skipping explicit up (passive/trap)."
     else
-        echo "Connection $name is auto=start, skipping explicit up."
+         # Should not happen with new parser, but for safety:
+         echo "Connection $name has unknown mode $auto_mode, attempting ipsec up..."
+         ipsec up "$name" >/dev/null 2>&1 || true
     fi
 done <<< "$CONFIG_DATA"
 
