@@ -150,8 +150,13 @@ echo "Configuring strongSwan to use interface: $OUT_INTERFACE"
 cat <<EOF >> /etc/strongswan.conf
 charon {
   interfaces_use = $OUT_INTERFACE
+  install_routes = no
 }
 EOF
+
+# Detect Default Gateway for Legacy Routes
+DEFAULT_GW=$(ip route show default | awk '{print $3}' | head -n 1)
+echo "Detected Default Gateway: $DEFAULT_GW"
 
 # --- FIREWALL & VTI SETUP ---
 CHAIN_PREFIX="${IPTABLES_CHAIN_PREFIX:-STRONGSWAN}"
@@ -430,6 +435,24 @@ while IFS=';' read -r name mark left right left_sub right_sub auto; do
         ipsec up "$name" >/dev/null 2>&1 || true
     else
         echo "Connection $name is auto=start, skipping explicit up."
+    fi
+
+    # Enforce routing for both VTI and Legacy (since install_routes = no)
+    if [ -n "$right_sub" ]; then
+        if [ "$mark" != "0" ]; then
+            # VTI Mode
+            vti_interface="vti${mark}"
+            echo "Adding VTI route for $name: $right_sub via $vti_interface"
+            ip route replace "$right_sub" dev "$vti_interface" table "$TABLE_ID" || true
+        else
+            # Legacy Mode
+            echo "Adding Legacy route for $name: $right_sub"
+            if [ -n "$DEFAULT_GW" ]; then
+                 ip route replace "$right_sub" via "$DEFAULT_GW" dev "$OUT_INTERFACE" table "$TABLE_ID" || true
+            else
+                 ip route replace "$right_sub" dev "$OUT_INTERFACE" table "$TABLE_ID" || true
+            fi
+        fi
     fi
 done <<< "$CONFIG_DATA"
 
