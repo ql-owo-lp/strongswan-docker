@@ -39,6 +39,7 @@ echo "Using Routing Table: ${TABLE_NUM}"
 
 # --- CLEANUP LEFTOVERS ---
 FLUSH_POLICY_ON_START=${FLUSH_POLICY_ON_START:-true}
+LOAD_BALANCE=${LOAD_BALANCE:-false}
 # Use INSTANCE_ID to uniquely identify interfaces owned by this container.
 # This prevents accidental deletion of VTIs from other strongSwan instances on the same host.
 INSTANCE_ID="${INSTANCE_ID:-strongswan-local}"
@@ -460,7 +461,6 @@ start_frr
 sleep 5
 
 # Start connections
-# Start connections
 while IFS=';' read -r name mark left right left_sub right_sub auto; do
     if [ -z "$name" ]; then continue; fi
     # Only bring up if not auto=start (which charon handles automatically)
@@ -470,24 +470,58 @@ while IFS=';' read -r name mark left right left_sub right_sub auto; do
     else
         echo "Connection $name is auto=start, skipping explicit up."
     fi
+done <<< "$CONFIG_DATA"
 
-    # Enforce routing for both VTI and Legacy (since install_routes = no)
-    if [ -n "$right_sub" ]; then
-        if [ "$mark" != "0" ]; then
-            # VTI Mode
-            vti_interface=$(get_vti_name "$mark")
-            echo "Adding VTI route for $name: $right_sub via $vti_interface"
-            ip route replace "$right_sub" dev "$vti_interface" table "$TABLE_NUM" || true
-        else
-            # Legacy Mode
-            echo "Adding Legacy route for $name: $right_sub"
-            if [ -n "$DEFAULT_GW" ]; then
-                 ip route replace "$right_sub" via "$DEFAULT_GW" dev "$OUT_INTERFACE" table "$TABLE_NUM" || true
-            else
-                 ip route replace "$right_sub" dev "$OUT_INTERFACE" table "$TABLE_NUM" || true
-            fi
-        fi
+# --- ROUTING INSTALLATION (with optional ECMP Load Balancing) ---
+# We use an associative array (requires bash) to group interfaces by destination subnet.
+declare -A SUB_IFACES
+
+# First, collect all interfaces per subnet
+while IFS=';' read -r name mark left right left_sub right_sub auto; do
+    if [ -z "$name" ] || [ -z "$right_sub" ]; then continue; fi
+    if [ "$mark" != "0" ]; then
+        iface=$(get_vti_name "$mark")
+        # Split multiple right subnets (comma-separated)
+        IFS=',' read -ra R_SUBS <<< "$right_sub"
+        for sub in "${R_SUBS[@]}"; do
+            SUB_IFACES["$sub"]+="$iface "
+        done
     fi
+done <<< "$CONFIG_DATA"
+
+# Now install routes
+for sub in "${!SUB_IFACES[@]}"; do
+    ifaces=(${SUB_IFACES[$sub]})
+    if [ "$LOAD_BALANCE" == "true" ] && [ ${#ifaces[@]} -gt 1 ]; then
+        echo "Installing ECMP Load Balanced route for $sub via [${ifaces[*]}]"
+        # Build nexthop string
+        cmd="ip route replace $sub table $TABLE_NUM"
+        for iface in "${ifaces[@]}"; do
+            cmd="$cmd nexthop dev $iface weight 1"
+        done
+        $cmd || echo "Warning: Failed to install ECMP route for $sub"
+    else
+        # Single interface or load balancing disabled
+        # If multiple exist but LB is off, the first one in the list wins (consistent with legacy behavior)
+        iface=${ifaces[0]}
+        echo "Installing route for $sub via $iface (table $TABLE_NUM)"
+        ip route replace "$sub" dev "$iface" table "$TABLE_NUM" || true
+    fi
+done
+
+# Handle Legacy Routes (non-VTI connections)
+while IFS=';' read -r name mark left right left_sub right_sub auto; do
+    if [ -z "$name" ] || [ -z "$right_sub" ] || [ "$mark" != "0" ]; then continue; fi
+    IFS=',' read -ra R_SUBS <<< "$right_sub"
+    for sub in "${R_SUBS[@]}"; do
+        # Legacy Mode
+        echo "Adding Legacy route for $name: $sub"
+        if [ -n "$DEFAULT_GW" ]; then
+             ip route replace "$sub" via "$DEFAULT_GW" dev "$OUT_INTERFACE" table "$TABLE_NUM" || true
+        else
+             ip route replace "$sub" dev "$OUT_INTERFACE" table "$TABLE_NUM" || true
+        fi
+    done
 done <<< "$CONFIG_DATA"
 
 # --- BACKGROUND RECONCILER ---
@@ -511,10 +545,9 @@ reconcile_loop() {
              iptables -I FORWARD 1 -j ${CHAIN_FORWARD} 2>/dev/null || true
         fi
 
-        # Verify Interfaces and Routes
+        # Verify Interfaces
         while IFS=';' read -r name mark left right left_sub right_sub auto; do
             if [ -z "$name" ]; then continue; fi
-            
             if [ "$mark" != "0" ]; then
                 vti_name=$(get_vti_name "$mark")
                 # Check if interface exists and is tagged correctly
@@ -522,14 +555,29 @@ reconcile_loop() {
                     echo "RECONCILE: VTI $vti_name missing or untagged, recreating..."
                     setup_vti "$mark" "$left" "$right" "$right_sub"
                 fi
-                
-                # Check route
-                if ! ip route show table "$TABLE_NUM" | grep -q "$right_sub dev $vti_name"; then
-                    echo "RECONCILE: Route to $right_sub missing in table $TABLE_NUM, restoring..."
-                    ip route replace "$right_sub" dev "$vti_name" table "$TABLE_NUM" || true
-                fi
             fi
         done <<< "$CONFIG_DATA"
+
+        # Verify Routing Health (Reapply all routes to ensure ECMP/Single matches intended state)
+        # This is simpler than incremental diffing for complex ECMP routes.
+        # Collect and compare
+        local current_subs=$(ip route show table "$TABLE_NUM" | awk '{print $1}')
+        # We re-run the routing logic if any subnet is missing or if we suspect corruption.
+        # For simplicity in this shell script, we just re-verify the active routes.
+        for sub in "${!SUB_IFACES[@]}"; do
+             if ! ip route show table "$TABLE_NUM" | grep -q "$sub"; then
+                 echo "RECONCILE: Routing entry for $sub missing, restoring..."
+                 # Trigger re-installation (just for this subnet)
+                 ifaces=(${SUB_IFACES[$sub]})
+                 if [ "$LOAD_BALANCE" == "true" ] && [ ${#ifaces[@]} -gt 1 ]; then
+                     cmd="ip route replace $sub table $TABLE_NUM"
+                     for iface in "${ifaces[@]}"; do cmd="$cmd nexthop dev $iface weight 1"; done
+                     $cmd || true
+                 else
+                     ip route replace "$sub" dev "${ifaces[0]}" table "$TABLE_NUM" || true
+                 fi
+             fi
+        done
     done
 }
 

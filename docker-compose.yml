@@ -42,8 +42,10 @@ services:
     # These variables are used by the entrypoint.sh script to set up iptables.
     # Update these values to match your specific network environment.
     environment:
-      - LOCAL_NET=192.168.0.0/16
-      - VPN_SUBNET=10.10.0.0/24
-      - OUT_INTERFACE=eth0
+      - INSTANCE_ID=strongswan-local
+      - LOAD_BALANCE=true
+      - LOCAL_NET=192.168.8.0/21
+      - VPN_SUBNET=172.31.0.0/21
+      - OUT_INTERFACE=br0
       - IPV6_ENABLE=false
-      - FLUSH_POLICY_ON_START=false
+      - FLUSH_POLICY_ON_START=true

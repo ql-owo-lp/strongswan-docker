@@ -13,12 +13,13 @@ FROM mirror.gcr.io/library/alpine:${ALPINE_VERSION}
 # Added gawk for robust configuration parsing.
 RUN apk update && \
     apk add --no-cache \
-        strongswan \
-        iproute2 \
-        iptables \
-        gawk \
-        openssl \
-        frr && \
+    strongswan \
+    iproute2 \
+    iptables \
+    gawk \
+    openssl \
+    bash \
+    frr && \
     rm -rf /var/cache/apk/*
 
 # --- Configuration ---
