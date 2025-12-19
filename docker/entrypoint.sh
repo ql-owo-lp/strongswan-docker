@@ -43,6 +43,15 @@ FLUSH_POLICY_ON_START=${FLUSH_POLICY_ON_START:-true}
 # This prevents accidental deletion of VTIs from other strongSwan instances on the same host.
 INSTANCE_ID="${INSTANCE_ID:-strongswan-local}"
 
+# Sanitize INSTANCE_ID for interface prefix (limit to 10 chars, remove special chars)
+IFACE_PREFIX=$(echo "${INSTANCE_ID}" | sed 's/[^a-zA-Z0-9]//g' | cut -c1-10)
+echo "Using Instance ID: $INSTANCE_ID (Prefix: $IFACE_PREFIX)"
+
+get_vti_name() {
+    local mark=$1
+    echo "${IFACE_PREFIX}_v${mark}"
+}
+
 cleanup_xfrm() {
     echo "Cleaning up XFRM state/policies..."
     ip xfrm state flush || echo "Warning: Failed to flush xfrm state"
@@ -205,7 +214,7 @@ setup_vti() {
     local mark=$1
     local local_ip=$2
     local remote_ip=$3
-    local vti_name="vti${mark}"
+    local vti_name=$(get_vti_name "$mark")
 
     # VTI MTU: 1400 is the "Golden Number".
     local vti_mtu=1400
@@ -273,12 +282,13 @@ apply_firewall() {
 
         if [ "$mark" != "0" ]; then
             # --- VTI MODE ---
-            echo "Configuring VTI Firewall for $name (vti${mark})..."
+            local vti_name=$(get_vti_name "$mark")
+            echo "Configuring VTI Firewall for $name ($vti_name)..."
             setup_vti "$mark" "$left" "$right" "$right_sub"
 
             # Allow forwarding over VTI
-            iptables -A ${CHAIN_FORWARD} -i "vti${mark}" -j ACCEPT
-            iptables -A ${CHAIN_FORWARD} -o "vti${mark}" -j ACCEPT
+            iptables -A ${CHAIN_FORWARD} -i "$vti_name" -j ACCEPT
+            iptables -A ${CHAIN_FORWARD} -o "$vti_name" -j ACCEPT
 
             # NAT Exemption (Critical)
             IFS=',' read -ra R_SUBNETS <<< "$right_sub"
@@ -465,7 +475,7 @@ while IFS=';' read -r name mark left right left_sub right_sub auto; do
     if [ -n "$right_sub" ]; then
         if [ "$mark" != "0" ]; then
             # VTI Mode
-            vti_interface="vti${mark}"
+            vti_interface=$(get_vti_name "$mark")
             echo "Adding VTI route for $name: $right_sub via $vti_interface"
             ip route replace "$right_sub" dev "$vti_interface" table "$TABLE_NUM" || true
         else
@@ -480,6 +490,50 @@ while IFS=';' read -r name mark left right left_sub right_sub auto; do
     fi
 done <<< "$CONFIG_DATA"
 
+# --- BACKGROUND RECONCILER ---
+# Periodically verify interfaces, routes, and firewall rules are intact.
+reconcile_loop() {
+    echo "Starting Background Reconciler..."
+    while true; do
+        sleep 30
+        
+        # Verify Firewall Chains exist
+        if ! iptables -L ${CHAIN_FORWARD} >/dev/null 2>&1; then
+            echo "RECONCILE: Firewall chains missing, reapplying..."
+            cleanup_firewall
+            create_chains
+            apply_firewall
+        fi
+
+        # Verify Jump Rules
+        if ! iptables -S FORWARD | grep -q "${CHAIN_FORWARD}"; then
+             echo "RECONCILE: Forward jump missing, reapplying..."
+             iptables -I FORWARD 1 -j ${CHAIN_FORWARD} 2>/dev/null || true
+        fi
+
+        # Verify Interfaces and Routes
+        while IFS=';' read -r name mark left right left_sub right_sub auto; do
+            if [ -z "$name" ]; then continue; fi
+            
+            if [ "$mark" != "0" ]; then
+                vti_name=$(get_vti_name "$mark")
+                # Check if interface exists and is tagged correctly
+                if ! ip -o link show "$vti_name" | grep -q "alias managed-by-$INSTANCE_ID"; then
+                    echo "RECONCILE: VTI $vti_name missing or untagged, recreating..."
+                    setup_vti "$mark" "$left" "$right" "$right_sub"
+                fi
+                
+                # Check route
+                if ! ip route show table "$TABLE_NUM" | grep -q "$right_sub dev $vti_name"; then
+                    echo "RECONCILE: Route to $right_sub missing in table $TABLE_NUM, restoring..."
+                    ip route replace "$right_sub" dev "$vti_name" table "$TABLE_NUM" || true
+                fi
+            fi
+        done <<< "$CONFIG_DATA"
+    done
+}
+
 echo "Initialization complete."
 tail -f "$LOG_FILE" &
+reconcile_loop &
 wait "$IPSEC_PID"
