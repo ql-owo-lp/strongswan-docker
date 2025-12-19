@@ -47,10 +47,14 @@ cleanup_xfrm() {
 }
 
 cleanup_vtis() {
-    echo "Deleting existing VTI interfaces..."
-    ip tunnel show | grep vti | awk -F: '{print $1}' | while read intf; do
-        echo "     Deleting $intf"
-        ip link del $intf || echo "Warning: Failed to delete $intf"
+    echo "Scanning for stale VTI interfaces..."
+    # List all VTI interfaces and delete those matching vti[0-9]+
+    # We use 'ip -o link show type vti' to reliably find VTI interfaces.
+    ip -o link show type vti | awk -F': ' '{print $2}' | cut -d@ -f1 | while read intf; do
+        if [[ "$intf" =~ ^vti[0-9]+$ ]]; then
+            echo "     Deleting stale VTI: $intf"
+            ip link del "$intf" 2>/dev/null || true
+        fi
     done
 }
 
