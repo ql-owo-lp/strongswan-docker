@@ -39,6 +39,7 @@ echo "Using Routing Table: ${TABLE_NUM}"
 
 # --- CLEANUP LEFTOVERS ---
 FLUSH_POLICY_ON_START=${FLUSH_POLICY_ON_START:-true}
+VTI_STATE_FILE="/etc/strongswan.d/.managed_vtis.state"
 
 cleanup_xfrm() {
     echo "Cleaning up XFRM state/policies..."
@@ -47,15 +48,19 @@ cleanup_xfrm() {
 }
 
 cleanup_vtis() {
-    echo "Scanning for stale VTI interfaces..."
-    # List all VTI interfaces and delete those matching vti[0-9]+
-    # We use 'ip -o link show type vti' to reliably find VTI interfaces.
-    ip -o link show type vti | awk -F': ' '{print $2}' | cut -d@ -f1 | while read intf; do
-        if [[ "$intf" =~ ^vti[0-9]+$ ]]; then
-            echo "     Deleting stale VTI: $intf"
-            ip link del "$intf" 2>/dev/null || true
-        fi
-    done
+    if [ -f "$VTI_STATE_FILE" ]; then
+        echo "Cleaning up VTIs managed by this instance (from state file)..."
+        while read -r intf; do
+            if [ -n "$intf" ] && ip link show "$intf" >/dev/null 2>&1; then
+                echo "     Deleting managed VTI: $intf"
+                ip link del "$intf" 2>/dev/null || true
+            fi
+        done < "$VTI_STATE_FILE"
+        rm -f "$VTI_STATE_FILE"
+    else
+        echo "No VTI state file found. Skipping granular cleanup."
+        # Note: Broad cleanup (vti[0-9]+) is avoided to prevent interference with other instances.
+    fi
 }
 
 if [ "$FLUSH_POLICY_ON_START" == "true" ]; then
@@ -215,6 +220,9 @@ setup_vti() {
     echo "Creating VTI Interface: $vti_name (MTU: $vti_mtu, Mark: $mark)"
     ip tunnel add "$vti_name" mode vti local "$local_ip" remote "$remote_ip" key "$mark"
     ip link set "$vti_name" up mtu "$vti_mtu"
+    
+    # Record that we manage this interface
+    echo "$vti_name" >> "$VTI_STATE_FILE"
 
     # Disable policy lookup on the VTI interface itself
     # Disable policy lookup on the VTI interface itself
@@ -329,6 +337,9 @@ apply_firewall() {
             # Execute creation
             $cmd
             ip link set "$ifname" up mtu 1400
+            
+            # Record that we manage this interface
+            echo "$ifname" >> "$VTI_STATE_FILE"
             
             # Allow forwarding
             iptables -A ${CHAIN_FORWARD} -i "$ifname" -j ACCEPT
