@@ -444,14 +444,14 @@ while IFS=';' read -r name mark left right left_sub right_sub auto; do
             # VTI Mode
             vti_interface="vti${mark}"
             echo "Adding VTI route for $name: $right_sub via $vti_interface"
-            ip route replace "$right_sub" dev "$vti_interface" table "$TABLE_ID" || true
+            ip route replace "$right_sub" dev "$vti_interface" table "$TABLE_NUM" || true
         else
             # Legacy Mode
             echo "Adding Legacy route for $name: $right_sub"
             if [ -n "$DEFAULT_GW" ]; then
-                 ip route replace "$right_sub" via "$DEFAULT_GW" dev "$OUT_INTERFACE" table "$TABLE_ID" || true
+                 ip route replace "$right_sub" via "$DEFAULT_GW" dev "$OUT_INTERFACE" table "$TABLE_NUM" || true
             else
-                 ip route replace "$right_sub" dev "$OUT_INTERFACE" table "$TABLE_ID" || true
+                 ip route replace "$right_sub" dev "$OUT_INTERFACE" table "$TABLE_NUM" || true
             fi
         fi
     fi
