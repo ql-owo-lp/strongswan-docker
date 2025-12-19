@@ -497,9 +497,9 @@ echo "--------------------------"
 while IFS=';' read -r name mark left right left_sub right_sub auto_mode; do
     if [ -z "$name" ]; then continue; fi
 
-    if [ "$auto_mode" == "start" ]; then
+    if [ "$auto_mode" = "start" ]; then
          echo "Connection $name is auto=start, skipping explicit up."
-    elif [ "$auto_mode" == "add" ] || [ "$auto_mode" == "route" ]; then
+    elif [ "$auto_mode" = "add" ] || [ "$auto_mode" = "route" ]; then
          echo "Connection $name is auto=$auto_mode, skipping explicit up (passive/trap)."
     else
          # Should not happen with new parser, but for safety:
