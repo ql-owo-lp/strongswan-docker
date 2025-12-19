@@ -152,6 +152,11 @@ cat <<EOF > /etc/strongswan.d/entrypoint.conf
 charon {
   interfaces_use = $OUT_INTERFACE
   install_routes = no
+  plugins {
+    kernel-netlink {
+      hw_offload = yes
+    }
+  }
 }
 EOF
 
