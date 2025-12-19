@@ -146,8 +146,9 @@ fi
 echo "Physical Interface: $OUT_INTERFACE"
 
 # --- CONFIGURATION INJECTION ---
-echo "Configuring strongSwan to use interface: $OUT_INTERFACE"
-cat <<EOF >> /etc/strongswan.conf
+echo "Configuring strongSwan dynamic settings..."
+mkdir -p /etc/strongswan.d
+cat <<EOF > /etc/strongswan.d/entrypoint.conf
 charon {
   interfaces_use = $OUT_INTERFACE
   install_routes = no
