@@ -39,7 +39,9 @@ echo "Using Routing Table: ${TABLE_NUM}"
 
 # --- CLEANUP LEFTOVERS ---
 FLUSH_POLICY_ON_START=${FLUSH_POLICY_ON_START:-true}
-VTI_STATE_FILE="/etc/strongswan.d/.managed_vtis.state"
+# Use INSTANCE_ID to uniquely identify interfaces owned by this container.
+# This prevents accidental deletion of VTIs from other strongSwan instances on the same host.
+INSTANCE_ID="${INSTANCE_ID:-strongswan-local}"
 
 cleanup_xfrm() {
     echo "Cleaning up XFRM state/policies..."
@@ -48,19 +50,15 @@ cleanup_xfrm() {
 }
 
 cleanup_vtis() {
-    if [ -f "$VTI_STATE_FILE" ]; then
-        echo "Cleaning up VTIs managed by this instance (from state file)..."
-        while read -r intf; do
-            if [ -n "$intf" ] && ip link show "$intf" >/dev/null 2>&1; then
-                echo "     Deleting managed VTI: $intf"
-                ip link del "$intf" 2>/dev/null || true
-            fi
-        done < "$VTI_STATE_FILE"
-        rm -f "$VTI_STATE_FILE"
-    else
-        echo "No VTI state file found. Skipping granular cleanup."
-        # Note: Broad cleanup (vti[0-9]+) is avoided to prevent interference with other instances.
-    fi
+    echo "Scanning for VTI interfaces managed by instance: $INSTANCE_ID"
+    # Find all VTI interfaces that have our ownership alias
+    # Format: ip link show matches the alias exactly
+    ip -o link show | grep "alias managed-by-$INSTANCE_ID" | awk -F': ' '{print $2}' | cut -d@ -f1 | while read intf; do
+        if [ -n "$intf" ]; then
+            echo "     Deleting owned VTI: $intf"
+            ip link del "$intf" 2>/dev/null || true
+        fi
+    done
 }
 
 if [ "$FLUSH_POLICY_ON_START" == "true" ]; then
@@ -221,8 +219,8 @@ setup_vti() {
     ip tunnel add "$vti_name" mode vti local "$local_ip" remote "$remote_ip" key "$mark"
     ip link set "$vti_name" up mtu "$vti_mtu"
     
-    # Record that we manage this interface
-    echo "$vti_name" >> "$VTI_STATE_FILE"
+    # Tag the interface with an alias for stateful management
+    ip link set "$vti_name" alias "managed-by-$INSTANCE_ID"
 
     # Disable policy lookup on the VTI interface itself
     # Disable policy lookup on the VTI interface itself
@@ -338,8 +336,8 @@ apply_firewall() {
             $cmd
             ip link set "$ifname" up mtu 1400
             
-            # Record that we manage this interface
-            echo "$ifname" >> "$VTI_STATE_FILE"
+            # Tag the interface with an alias for stateful management
+            ip link set "$ifname" alias "managed-by-$INSTANCE_ID"
             
             # Allow forwarding
             iptables -A ${CHAIN_FORWARD} -i "$ifname" -j ACCEPT
