@@ -149,16 +149,9 @@ echo "Physical Interface: $OUT_INTERFACE"
 echo "Configuring strongSwan dynamic settings..."
 mkdir -p /etc/strongswan.d
 
-# Dynamic HW Offload Detection
-# If CPU supports AES (aes or vaes), enable hardware offload.
-# StrongSwan handles graceful fallback if the kernel driver rejects it, but this keeps config clean.
+# HW Offload defaults to 'no' for stability.
+# Auto-detection removed to prevent intermittent issues on unsupported kernels.
 HW_OFFLOAD="no"
-if grep -q -E "aes|vaes" /proc/cpuinfo; then
-    echo "AES-NI support detected. Enabling hardware offload."
-    HW_OFFLOAD="yes"
-else
-    echo "No AES-NI support detected. Disabling hardware offload."
-fi
 
 cat <<EOF > /etc/strongswan.d/entrypoint.conf
 charon {
