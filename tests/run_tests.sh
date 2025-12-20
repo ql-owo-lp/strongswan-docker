@@ -110,8 +110,8 @@ if ! grep -q "ip link set vti10 up mtu 1400" ${IPTABLES_MOCK_LOG}; then
 fi
 
 # Routing
-if ! grep -q "ip route add 172.31.0.0/21 dev vti10" ${IPTABLES_MOCK_LOG}; then
-  echo "FAIL: 'ip route add 172.31.0.0/21' command not found!"
+if ! grep -q "ip route replace 172.31.0.0/21 dev vti10" ${IPTABLES_MOCK_LOG}; then
+  echo "FAIL: 'ip route replace 172.31.0.0/21' command not found!"
   exit 1
 fi
 

@@ -263,7 +263,7 @@ setup_vti() {
     IFS=',' read -ra SUBNETS <<< "$4"
     for subnet in "${SUBNETS[@]}"; do
         echo "  -> Routing $subnet via $vti_name (metric $mark)"
-        ip route add "$subnet" dev "$vti_name" metric "$mark"
+        ip route replace "$subnet" dev "$vti_name" metric "$mark"
     done
 }
 
@@ -513,7 +513,7 @@ done <<< "$CONFIG_DATA"
 declare -A SUB_IFACES
 
 # First, collect all interfaces per subnet
-while IFS=';' read -r name mark left right left_sub right_sub auto; do
+while IFS=';' read -r name mark left right left_sub right_sub auto_mode; do
     if [ -z "$name" ] || [ -z "$right_sub" ]; then continue; fi
     if [ "$mark" != "0" ]; then
         iface=$(get_vti_name "$mark")
@@ -546,7 +546,7 @@ for sub in "${!SUB_IFACES[@]}"; do
 done
 
 # Handle Legacy Routes (non-VTI connections)
-while IFS=';' read -r name mark left right left_sub right_sub auto; do
+while IFS=';' read -r name mark left right left_sub right_sub auto_mode; do
     if [ -z "$name" ] || [ -z "$right_sub" ] || [ "$mark" != "0" ]; then continue; fi
     IFS=',' read -ra R_SUBS <<< "$right_sub"
     for sub in "${R_SUBS[@]}"; do
@@ -582,7 +582,7 @@ reconcile_loop() {
         fi
 
         # Verify Interfaces
-        while IFS=';' read -r name mark left right left_sub right_sub auto; do
+        while IFS=';' read -r name mark left right left_sub right_sub auto_mode; do
             if [ -z "$name" ]; then continue; fi
             if [ "$mark" != "0" ]; then
                 vti_name=$(get_vti_name "$mark")
