@@ -43,6 +43,7 @@ services:
     # Update these values to match your specific network environment.
     environment:
       - INSTANCE_ID=strongswan-local
+      - HW_OFFLOAD=auto
       - LOAD_BALANCE=true
       - LOCAL_NET=192.168.8.0/21
       - VPN_SUBNET=172.31.0.0/21

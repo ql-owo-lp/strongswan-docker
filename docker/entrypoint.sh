@@ -166,9 +166,27 @@ echo "Physical Interface: $OUT_INTERFACE"
 echo "Configuring strongSwan dynamic settings..."
 mkdir -p /etc/strongswan.d
 
-# HW Offload defaults to 'no' for stability.
-# Auto-detection removed to prevent intermittent issues on unsupported kernels.
-HW_OFFLOAD="no"
+# HW Offload Configuration
+HW_OFFLOAD=${HW_OFFLOAD:-no}
+
+if [ "$HW_OFFLOAD" == "auto" ]; then
+    echo "HW Offload mode: auto. Checking interface $OUT_INTERFACE..."
+    if command -v ethtool >/dev/null; then
+        # Check for esp-hw-offload: on
+        if ethtool -k "$OUT_INTERFACE" 2>/dev/null | grep -q "esp-hw-offload: on"; then
+             echo "Detected support for 'esp-hw-offload'. Enabling HW_OFFLOAD."
+             HW_OFFLOAD="yes"
+        else
+             echo "Interface $OUT_INTERFACE does not support 'esp-hw-offload' (or feature is off). Disabling HW_OFFLOAD."
+             HW_OFFLOAD="no"
+        fi
+    else
+        echo "Warning: ethtool not found. Cannot auto-detect. Defaulting HW_OFFLOAD to no."
+        HW_OFFLOAD="no"
+    fi
+else
+    echo "HW Offload set manually to: $HW_OFFLOAD"
+fi
 
 cat <<EOF > /etc/strongswan.d/entrypoint.conf
 charon {
@@ -459,6 +477,16 @@ IPSEC_PID=$!
 start_frr
 
 sleep 5
+
+# Force reload to ensure all configs are picked up by charon
+echo "Reloading strongSwan configuration..."
+ipsec reload || true
+sleep 2
+
+# Log loaded connections for debugging
+echo "--- Loaded Connections ---"
+ipsec status || true
+echo "--------------------------"
 
 # Start connections
 while IFS=';' read -r name mark left right left_sub right_sub auto; do

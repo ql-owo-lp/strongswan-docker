@@ -17,6 +17,7 @@ RUN apk update && \
     iproute2 \
     iptables \
     gawk \
+    ethtool \
     openssl \
     bash \
     frr && \
