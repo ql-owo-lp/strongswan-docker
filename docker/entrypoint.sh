@@ -238,13 +238,28 @@ setup_vti() {
     # VTI MTU: 1400 is the "Golden Number".
     local vti_mtu=1400
 
+    # Robust Cleanup: Check for collision by Mark/Key (handles renames/stale interfaces)
+    # matching "key <mark>" at end of line or followed by space
+    local existing_vti=$(ip tunnel show | grep -E "key $mark($|[[:space:]])" | cut -d: -f1 | head -n 1)
+    if [ -n "$existing_vti" ]; then
+        echo "Found existing VTI interface $existing_vti with mark $mark. Deleting..."
+        ip link del "$existing_vti" 2>/dev/null || true
+    fi
+
     if ip link show "$vti_name" >/dev/null 2>&1; then
         echo "VTI interface $vti_name already exists, resetting..."
         ip link del "$vti_name"
     fi
 
     echo "Creating VTI Interface: $vti_name (MTU: $vti_mtu, Mark: $mark)"
-    ip tunnel add "$vti_name" mode vti local "$local_ip" remote "$remote_ip" key "$mark"
+    echo "DEBUG: Executing: ip tunnel add \"$vti_name\" mode vti remote \"$remote_ip\" key \"$mark\""
+    
+    # Use specific remote but omit local (allow multiple tunnels to same remote)
+    if ! ip tunnel add "$vti_name" mode vti remote "$remote_ip" key "$mark"; then
+        echo "ERROR: Failed to create VTI interface $vti_name"
+        echo "ARGS: name=$vti_name remote=$remote_ip key=$mark"
+        exit 1
+    fi
     ip link set "$vti_name" up mtu "$vti_mtu"
     
     # Tag the interface with an alias for stateful management
@@ -520,6 +535,13 @@ done <<< "$CONFIG_DATA"
 # Now install routes
 for sub in "${!SUB_IFACES[@]}"; do
     ifaces=(${SUB_IFACES[$sub]})
+    
+    # Sort interfaces to ensure deterministic Primary selection (Lower Mark/Name = Primary)
+    # This prevents picking Backup interface if config order is reversed.
+    IFS=$'\n' sorted=($(sort <<<"${ifaces[*]// /$'\n'}"))
+    unset IFS
+    ifaces=("${sorted[@]}")
+
     if [ "$LOAD_BALANCE" == "true" ] && [ ${#ifaces[@]} -gt 1 ]; then
         echo "Installing ECMP Load Balanced route for $sub via [${ifaces[*]}]"
         # Build nexthop string
