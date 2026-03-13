@@ -684,11 +684,15 @@ reconcile_loop() {
 
                 if [ "$SS_FAIL_COUNT" -gt "$MAX_STRONGSWAN_RETRIES" ]; then
                     echo "CRITICAL: strongSwan failed to recover after $MAX_STRONGSWAN_RETRIES retries. Restarting container..."
-                    kill "$IPSEC_PID"
+                    # Kill the container gracefully via SIGTERM to PID 1
+                    kill -TERM 1
                     exit 1
                 fi
 
                 echo "RECONCILE: Restarting strongSwan process..."
+                # Use restart, but remember that the daemon forks in the background,
+                # so the main shell's wait on IPSEC_PID will finish if it was waiting on the --nofork process.
+                # However, our main shell is now waiting on the tail process!
                 ipsec restart
 
                 # Reset individual connection counters
@@ -720,7 +724,7 @@ reconcile_loop() {
 
                     if [ "$fails" -gt "$MAX_CONN_RETRIES" ]; then
                         echo "CRITICAL: Connection $c failed to recover after $MAX_CONN_RETRIES retries. Restarting container..."
-                        kill "$IPSEC_PID"
+                        kill -TERM 1
                         exit 1
                     fi
 
@@ -747,5 +751,11 @@ reconcile_loop() {
 
 echo "Initialization complete."
 tail -f "$LOG_FILE" &
+TAIL_PID=$!
 reconcile_loop &
-wait "$IPSEC_PID"
+
+# Wait for the tail process instead of IPSEC_PID.
+# This prevents the container from exiting when `ipsec restart` is called,
+# since `ipsec restart` forks the daemon and stops the foreground process.
+# The `trap` will handle graceful termination on container stop.
+wait "$TAIL_PID"

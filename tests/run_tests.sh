@@ -100,29 +100,29 @@ fi
 # --- VTI MODE CHECKS ---
 echo "Verifying VTI setup..."
 # VTI Interface Creation
-if ! grep -q "ip tunnel add vti10 mode vti local 1.2.3.4 remote 5.6.7.8 key 10" ${IPTABLES_MOCK_LOG}; then
-  echo "FAIL: 'ip tunnel add vti10' command not found!"
+if ! grep -q 'ip tunnel add "_v10" mode vti remote "5.6.7.8" key "10"' ${IPTABLES_MOCK_LOG}; then
+  echo "FAIL: 'ip tunnel add _v10' command not found!"
   exit 1
 fi
-if ! grep -q "ip link set vti10 up mtu 1400" ${IPTABLES_MOCK_LOG}; then
-  echo "FAIL: 'ip link set vti10' command not found!"
+if ! grep -q "ip link set _v10 up mtu 1400" ${IPTABLES_MOCK_LOG}; then
+  echo "FAIL: 'ip link set _v10' command not found!"
   exit 1
 fi
 
 # Routing
-if ! grep -q "ip route add 172.31.0.0/21 dev vti10" ${IPTABLES_MOCK_LOG}; then
+if ! grep -q "ip route add 172.31.0.0/21 dev _v10" ${IPTABLES_MOCK_LOG}; then
   echo "FAIL: 'ip route add 172.31.0.0/21' command not found!"
   exit 1
 fi
 
 # Firewall rules for VTI
 # Allow forwarding over VTI
-if ! grep -q "iptables -A ${CHAIN_FORWARD} -i vti10 -j ACCEPT" ${IPTABLES_MOCK_LOG}; then
-  echo "FAIL: Forwarding rule for input vti10 not found!"
+if ! grep -q "iptables -A ${CHAIN_FORWARD} -i _v10 -j ACCEPT" ${IPTABLES_MOCK_LOG}; then
+  echo "FAIL: Forwarding rule for input _v10 not found!"
   exit 1
 fi
-if ! grep -q "iptables -A ${CHAIN_FORWARD} -o vti10 -j ACCEPT" ${IPTABLES_MOCK_LOG}; then
-  echo "FAIL: Forwarding rule for output vti10 not found!"
+if ! grep -q "iptables -A ${CHAIN_FORWARD} -o _v10 -j ACCEPT" ${IPTABLES_MOCK_LOG}; then
+  echo "FAIL: Forwarding rule for output _v10 not found!"
   exit 1
 fi
 
