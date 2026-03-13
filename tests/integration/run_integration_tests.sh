@@ -191,6 +191,31 @@ test_redundancy() {
     docker exec $CLIENT_NAME ping -c 3 -W 1 -I 192.168.0.1 10.10.0.1
 }
 
+test_auto_recovery() {
+    log "Testing Auto-Recovery (Bringing down net-1 manually)..."
+    docker exec $CLIENT_NAME ipsec down net-1
+
+    # Verify it went down
+    if docker exec $CLIENT_NAME ipsec status net-1 | grep -q "ESTABLISHED"; then
+        error "net-1 failed to go down during auto-recovery test."
+        return 1
+    fi
+
+    log "Waiting for auto-recovery to kick in (approx 35s)..."
+    sleep 35
+
+    # Use wait_for_connection to verify it came back up
+    wait_for_connection $CLIENT_NAME "net-1"
+
+    log "Retesting connectivity after auto-recovery..."
+    if docker exec $CLIENT_NAME iperf3 -c 10.10.0.1 -B 192.168.0.1 -t 5; then
+        log "Auto-Recovery Test PASSED!"
+    else
+        error "Auto-Recovery Test FAILED!"
+        return 1
+    fi
+}
+
 test_recovery() {
     log "Testing Recovery (Restarting Client)..."
     docker restart $CLIENT_NAME
@@ -323,6 +348,7 @@ else
     wait_for_connection $CLIENT_NAME "net-2"
     test_connectivity
     test_redundancy
+    test_auto_recovery
     test_recovery
     test_hard_recovery
 fi

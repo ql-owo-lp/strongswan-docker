@@ -100,7 +100,7 @@ fi
 # --- VTI MODE CHECKS ---
 echo "Verifying VTI setup..."
 # VTI Interface Creation
-if ! grep -q 'ip tunnel add "_v10" mode vti remote "5.6.7.8" key "10"' ${IPTABLES_MOCK_LOG}; then
+if ! grep -q 'ip tunnel add _v10 mode vti remote 5.6.7.8 key 10' ${IPTABLES_MOCK_LOG}; then
   echo "FAIL: 'ip tunnel add _v10' command not found!"
   exit 1
 fi

@@ -602,8 +602,9 @@ MAX_STRONGSWAN_RETRIES=${MAX_STRONGSWAN_RETRIES:-3}
 # Periodically verify interfaces, routes, and firewall rules are intact.
 reconcile_loop() {
     echo "Starting Background Reconciler..."
+    local check_interval=${HEALTH_CHECK_INTERVAL:-30}
     while true; do
-        sleep 30
+        sleep "$check_interval"
         
         # Verify Firewall Chains exist
         if ! iptables -L ${CHAIN_FORWARD} >/dev/null 2>&1; then
