@@ -574,6 +574,30 @@ while IFS=';' read -r name mark left right left_sub right_sub auto; do
     done
 done <<< "$CONFIG_DATA"
 
+# --- CONNECTION HEALTH CHECK ---
+is_conn_up() {
+    local conn_name="$1"
+    local status_out
+    status_out=$(ipsec status "$conn_name" 2>/dev/null || true)
+
+    # Check if both ESTABLISHED (IKE SA) and INSTALLED (CHILD SA) are present.
+    # Note: If there are multiple CHILD_SAs or complex setups, this assumes at least one is up.
+    if echo "$status_out" | grep -q "ESTABLISHED" && echo "$status_out" | grep -q "INSTALLED"; then
+        return 0
+    else
+        return 1
+    fi
+}
+
+# --- BACKOFF AND RETRY STATE ---
+declare -A CONN_FAIL_COUNT
+declare -A CONN_BACKOFF_UNTIL
+SS_FAIL_COUNT=0
+SS_BACKOFF_UNTIL=0
+
+MAX_CONN_RETRIES=${MAX_CONN_RETRIES:-5}
+MAX_STRONGSWAN_RETRIES=${MAX_STRONGSWAN_RETRIES:-3}
+
 # --- BACKGROUND RECONCILER ---
 # Periodically verify interfaces, routes, and firewall rules are intact.
 reconcile_loop() {
@@ -628,6 +652,96 @@ reconcile_loop() {
                  fi
              fi
         done
+
+        # Verify Connection Health and Auto-Recover
+        local total_conns=0
+        local failed_conns=0
+        local failed_list=""
+
+        while IFS=';' read -r name mark left right left_sub right_sub auto; do
+            if [ -z "$name" ]; then continue; fi
+            total_conns=$((total_conns + 1))
+
+            if is_conn_up "$name"; then
+                # Connection is up, reset fail count
+                CONN_FAIL_COUNT["$name"]=0
+                CONN_BACKOFF_UNTIL["$name"]=0
+            else
+                failed_conns=$((failed_conns + 1))
+                failed_list="$failed_list $name"
+            fi
+        done <<< "$CONFIG_DATA"
+
+        local current_time
+        current_time=$(date +%s)
+
+        if [ "$total_conns" -gt 0 ] && [ "$failed_conns" -eq "$total_conns" ]; then
+            echo "RECONCILE: ALL connections ($total_conns) are DOWN."
+
+            if [ "$current_time" -ge "$SS_BACKOFF_UNTIL" ]; then
+                SS_FAIL_COUNT=$((SS_FAIL_COUNT + 1))
+                echo "RECONCILE: strongSwan Process Failure Count: $SS_FAIL_COUNT / $MAX_STRONGSWAN_RETRIES"
+
+                if [ "$SS_FAIL_COUNT" -gt "$MAX_STRONGSWAN_RETRIES" ]; then
+                    echo "CRITICAL: strongSwan failed to recover after $MAX_STRONGSWAN_RETRIES retries. Restarting container..."
+                    kill "$IPSEC_PID"
+                    exit 1
+                fi
+
+                echo "RECONCILE: Restarting strongSwan process..."
+                ipsec restart
+
+                # Reset individual connection counters
+                for c in $failed_list; do
+                    CONN_FAIL_COUNT["$c"]=0
+                    CONN_BACKOFF_UNTIL["$c"]=0
+                done
+
+                # Exponential backoff (e.g., 30s, 60s, 120s...)
+                local backoff_sec=$(( 30 * (2 ** (SS_FAIL_COUNT - 1)) ))
+                SS_BACKOFF_UNTIL=$(( current_time + backoff_sec ))
+                echo "RECONCILE: Process backed off for $backoff_sec seconds."
+            else
+                echo "RECONCILE: Waiting for strongSwan process backoff to expire..."
+            fi
+        elif [ "$failed_conns" -gt 0 ]; then
+            # Some connections failed, reset global process counter
+            SS_FAIL_COUNT=0
+            SS_BACKOFF_UNTIL=0
+
+            for c in $failed_list; do
+                local backoff_until=${CONN_BACKOFF_UNTIL["$c"]:-0}
+                if [ "$current_time" -ge "$backoff_until" ]; then
+                    local fails=${CONN_FAIL_COUNT["$c"]:-0}
+                    fails=$((fails + 1))
+                    CONN_FAIL_COUNT["$c"]=$fails
+
+                    echo "RECONCILE: Connection $c is DOWN (Fail Count: $fails / $MAX_CONN_RETRIES)"
+
+                    if [ "$fails" -gt "$MAX_CONN_RETRIES" ]; then
+                        echo "CRITICAL: Connection $c failed to recover after $MAX_CONN_RETRIES retries. Restarting container..."
+                        kill "$IPSEC_PID"
+                        exit 1
+                    fi
+
+                    echo "RECONCILE: Restarting connection $c..."
+                    ipsec down "$c" >/dev/null 2>&1 || true
+                    sleep 2
+                    ipsec up "$c" >/dev/null 2>&1 || true
+
+                    local backoff_sec=$(( 10 * (2 ** (fails - 1)) ))
+                    CONN_BACKOFF_UNTIL["$c"]=$(( current_time + backoff_sec ))
+                    echo "RECONCILE: Connection $c backed off for $backoff_sec seconds."
+                else
+                    echo "RECONCILE: Connection $c is in backoff state, skipping restart..."
+                fi
+            done
+        else
+            # All connections are up, reset global process counter
+            SS_FAIL_COUNT=0
+            SS_BACKOFF_UNTIL=0
+        fi
+
     done
 }
 
