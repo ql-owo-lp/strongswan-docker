@@ -176,7 +176,7 @@ test_connectivity() {
     fi
 
     log "Testing UDP (iperf3)..."
-    if docker exec $CLIENT_NAME iperf3 -c 10.10.0.1 -B 192.168.0.1 -u -b 10M -t 5; then
+    if docker exec $CLIENT_NAME iperf3 -c 10.10.0.1 -B 192.168.0.1 -u -b 10M -l 1300 -t 5; then
          log "UDP iperf3 Test PASSED!"
     else
          error "UDP iperf3 Test FAILED!"
