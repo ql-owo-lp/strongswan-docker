@@ -18,6 +18,12 @@ jobs:
     - name: Make entrypoint executable (Fix for permissions)
       run: chmod +x docker/entrypoint.sh
 
+    - name: Load required kernel modules
+      run: |
+        sudo modprobe ip_vti || true
+        sudo modprobe ip_gre || true
+        sudo modprobe xfrm_user || true
+
     - name: Run Integration Tests
       run: |
         chmod +x tests/integration/run_integration_tests.sh
