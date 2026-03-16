@@ -176,7 +176,11 @@ test_connectivity() {
     fi
 
     log "Testing UDP (iperf3)..."
-    if docker exec $CLIENT_NAME iperf3 -c 10.10.0.1 -B 192.168.0.1 -u -b 10M -t 5; then
+    # Restart iperf3 server in case it exited after the TCP test
+    docker exec -d $SERVER_NAME iperf3 -s
+    sleep 1
+    # Use -l 1300 to keep UDP payload below VTI MTU (1400) and avoid fragmentation
+    if docker exec $CLIENT_NAME iperf3 -c 10.10.0.1 -B 192.168.0.1 -u -b 10M -l 1300 -t 5; then
          log "UDP iperf3 Test PASSED!"
     else
          error "UDP iperf3 Test FAILED!"
@@ -189,6 +193,33 @@ test_redundancy() {
     wait_for_connection $CLIENT_NAME "net-2"
     # Same Connectivity test should work
     docker exec $CLIENT_NAME ping -c 3 -W 1 -I 192.168.0.1 10.10.0.1
+}
+
+test_auto_recovery() {
+    log "Testing Auto-Recovery (Bringing down net-1 manually)..."
+    docker exec $CLIENT_NAME ipsec down net-1
+
+    # Verify it went down
+    if docker exec $CLIENT_NAME ipsec status net-1 | grep -q "ESTABLISHED"; then
+        error "net-1 failed to go down during auto-recovery test."
+        return 1
+    fi
+
+    log "Waiting for auto-recovery to kick in (approx 35s)..."
+    sleep 35
+
+    # Use wait_for_connection to verify it came back up
+    wait_for_connection $CLIENT_NAME "net-1"
+
+    log "Retesting connectivity after auto-recovery..."
+    docker exec -d $SERVER_NAME iperf3 -s
+    sleep 1
+    if docker exec $CLIENT_NAME iperf3 -c 10.10.0.1 -B 192.168.0.1 -t 5; then
+        log "Auto-Recovery Test PASSED!"
+    else
+        error "Auto-Recovery Test FAILED!"
+        return 1
+    fi
 }
 
 test_recovery() {
@@ -204,6 +235,8 @@ test_recovery() {
     wait_for_connection $CLIENT_NAME "net-1"
     
     log "Retesting connectivity after restart..."
+    docker exec -d $SERVER_NAME iperf3 -s
+    sleep 1
     if docker exec $CLIENT_NAME iperf3 -c 10.10.0.1 -B 192.168.0.1 -t 5; then
         log "Recovery Test PASSED!"
     else
@@ -231,6 +264,8 @@ test_hard_recovery() {
     wait_for_connection $CLIENT_NAME "net-1"
     
     log "Retesting connectivity after hard kill..."
+    docker exec -d $SERVER_NAME iperf3 -s
+    sleep 1
     if docker exec $CLIENT_NAME iperf3 -c 10.10.0.1 -B 192.168.0.1 -t 5; then
         log "Hard Recovery Test PASSED!"
     else
@@ -323,6 +358,7 @@ else
     wait_for_connection $CLIENT_NAME "net-2"
     test_connectivity
     test_redundancy
+    test_auto_recovery
     test_recovery
     test_hard_recovery
 fi
