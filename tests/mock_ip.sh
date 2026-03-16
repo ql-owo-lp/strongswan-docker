@@ -12,10 +12,11 @@ if [ "$1" == "route" ] && [ -z "$2" ]; then
     exit 0
 fi
 
-# Handle 'ip link show vti*' to check if interface exists.
+# Handle 'ip link show <ifname>' to check if an interface exists.
 # We return 1 (error) to simulate that the interface does NOT exist,
 # so the script proceeds to create it without trying to delete it first.
-if [[ "$*" == *"link show vti"* ]]; then
+# This matches both legacy 'vti*' names and the current '${IFACE_PREFIX}_v*' names.
+if [ "$1" = "link" ] && [ "$2" = "show" ] && [ -n "$3" ]; then
     exit 1
 fi
 

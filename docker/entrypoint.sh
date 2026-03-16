@@ -574,12 +574,41 @@ while IFS=';' read -r name mark left right left_sub right_sub auto; do
     done
 done <<< "$CONFIG_DATA"
 
+# --- CONNECTION HEALTH CHECK ---
+is_conn_up() {
+    local conn_name="$1"
+    local status_out
+    status_out=$(ipsec status "$conn_name" 2>/dev/null || true)
+
+    # Check if IKE SA is ESTABLISHED. CHILD SA may briefly be absent during
+    # rekeying, so we only require ESTABLISHED to avoid false positives.
+    if echo "$status_out" | grep -q "ESTABLISHED"; then
+        return 0
+    else
+        return 1
+    fi
+}
+
+# --- BACKOFF AND RETRY STATE ---
+declare -A CONN_FAIL_COUNT
+declare -A CONN_BACKOFF_UNTIL
+SS_FAIL_COUNT=0
+SS_BACKOFF_UNTIL=0
+SS_CONSECUTIVE_DOWN=0
+
+MAX_CONN_RETRIES=${MAX_CONN_RETRIES:-5}
+MAX_STRONGSWAN_RETRIES=${MAX_STRONGSWAN_RETRIES:-3}
+# Number of consecutive "all-down" checks required before triggering a restart.
+# This prevents false positives from transient IPsec rekeying or test traffic.
+SS_CONSECUTIVE_DOWN_THRESHOLD=${SS_CONSECUTIVE_DOWN_THRESHOLD:-2}
+
 # --- BACKGROUND RECONCILER ---
 # Periodically verify interfaces, routes, and firewall rules are intact.
 reconcile_loop() {
     echo "Starting Background Reconciler..."
+    local check_interval=${HEALTH_CHECK_INTERVAL:-30}
     while true; do
-        sleep 30
+        sleep "$check_interval"
         
         # Verify Firewall Chains exist
         if ! iptables -L ${CHAIN_FORWARD} >/dev/null 2>&1; then
@@ -628,10 +657,114 @@ reconcile_loop() {
                  fi
              fi
         done
+
+        # Verify Connection Health and Auto-Recover
+        local total_conns=0
+        local failed_conns=0
+        local failed_list=""
+
+        while IFS=';' read -r name mark left right left_sub right_sub auto; do
+            if [ -z "$name" ]; then continue; fi
+            total_conns=$((total_conns + 1))
+
+            if is_conn_up "$name"; then
+                # Connection is up, reset fail count
+                CONN_FAIL_COUNT["$name"]=0
+                CONN_BACKOFF_UNTIL["$name"]=0
+            else
+                failed_conns=$((failed_conns + 1))
+                failed_list="$failed_list $name"
+            fi
+        done <<< "$CONFIG_DATA"
+
+        local current_time
+        current_time=$(date +%s)
+
+        if [ "$total_conns" -gt 0 ] && [ "$failed_conns" -eq "$total_conns" ]; then
+            SS_CONSECUTIVE_DOWN=$((SS_CONSECUTIVE_DOWN + 1))
+            echo "RECONCILE: ALL connections ($total_conns) are DOWN (consecutive: $SS_CONSECUTIVE_DOWN / $SS_CONSECUTIVE_DOWN_THRESHOLD)."
+
+            # Require multiple consecutive "all-down" checks before restarting strongSwan.
+            # This prevents false positives from rekeying events or transient test traffic.
+            if [ "$SS_CONSECUTIVE_DOWN" -ge "$SS_CONSECUTIVE_DOWN_THRESHOLD" ]; then
+                if [ "$current_time" -ge "$SS_BACKOFF_UNTIL" ]; then
+                    SS_FAIL_COUNT=$((SS_FAIL_COUNT + 1))
+                    echo "RECONCILE: strongSwan Process Failure Count: $SS_FAIL_COUNT / $MAX_STRONGSWAN_RETRIES"
+
+                    if [ "$SS_FAIL_COUNT" -gt "$MAX_STRONGSWAN_RETRIES" ]; then
+                        echo "CRITICAL: strongSwan failed to recover after $MAX_STRONGSWAN_RETRIES retries. Restarting container..."
+                        kill -TERM 1
+                        exit 1
+                    fi
+
+                    echo "RECONCILE: Restarting strongSwan process..."
+                    ipsec restart
+
+                    # Reset individual connection counters and consecutive-down counter
+                    SS_CONSECUTIVE_DOWN=0
+                    for c in $failed_list; do
+                        CONN_FAIL_COUNT["$c"]=0
+                        CONN_BACKOFF_UNTIL["$c"]=0
+                    done
+
+                    # Exponential backoff (e.g., 30s, 60s, 120s...)
+                    local backoff_sec=$(( 30 * (2 ** (SS_FAIL_COUNT - 1)) ))
+                    SS_BACKOFF_UNTIL=$(( current_time + backoff_sec ))
+                    echo "RECONCILE: Process backed off for $backoff_sec seconds."
+                else
+                    echo "RECONCILE: Waiting for strongSwan process backoff to expire..."
+                fi
+            fi
+        elif [ "$failed_conns" -gt 0 ]; then
+            # Some (but not all) connections failed — reset global process counters
+            SS_FAIL_COUNT=0
+            SS_BACKOFF_UNTIL=0
+            SS_CONSECUTIVE_DOWN=0
+
+            for c in $failed_list; do
+                local backoff_until=${CONN_BACKOFF_UNTIL["$c"]:-0}
+                if [ "$current_time" -ge "$backoff_until" ]; then
+                    local fails=${CONN_FAIL_COUNT["$c"]:-0}
+                    fails=$((fails + 1))
+                    CONN_FAIL_COUNT["$c"]=$fails
+
+                    echo "RECONCILE: Connection $c is DOWN (Fail Count: $fails / $MAX_CONN_RETRIES)"
+
+                    if [ "$fails" -gt "$MAX_CONN_RETRIES" ]; then
+                        echo "CRITICAL: Connection $c failed to recover after $MAX_CONN_RETRIES retries. Restarting container..."
+                        kill -TERM 1
+                        exit 1
+                    fi
+
+                    echo "RECONCILE: Restarting connection $c..."
+                    ipsec down "$c" >/dev/null 2>&1 || true
+                    sleep 2
+                    ipsec up "$c" >/dev/null 2>&1 || true
+
+                    local backoff_sec=$(( 10 * (2 ** (fails - 1)) ))
+                    CONN_BACKOFF_UNTIL["$c"]=$(( current_time + backoff_sec ))
+                    echo "RECONCILE: Connection $c backed off for $backoff_sec seconds."
+                else
+                    echo "RECONCILE: Connection $c is in backoff state, skipping restart..."
+                fi
+            done
+        else
+            # All connections are up — reset all counters
+            SS_FAIL_COUNT=0
+            SS_BACKOFF_UNTIL=0
+            SS_CONSECUTIVE_DOWN=0
+        fi
+
     done
 }
 
 echo "Initialization complete."
 tail -f "$LOG_FILE" &
+TAIL_PID=$!
 reconcile_loop &
-wait "$IPSEC_PID"
+
+# Wait for the tail process instead of IPSEC_PID.
+# This keeps the container alive even when `ipsec restart` is called,
+# since `ipsec restart` forks the daemon and terminates the --nofork process.
+# The `trap` handles graceful termination on container stop (SIGTERM/SIGINT).
+wait "$TAIL_PID"

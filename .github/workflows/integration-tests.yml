@@ -10,13 +10,19 @@ jobs:
   integration-test:
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v3
+    - uses: actions/checkout@v4
 
     - name: Set up Docker Buildx
-      uses: docker/setup-buildx-action@v2
+      uses: docker/setup-buildx-action@v3
 
     - name: Make entrypoint executable (Fix for permissions)
       run: chmod +x docker/entrypoint.sh
+
+    - name: Load required kernel modules
+      run: |
+        sudo modprobe ip_vti || true
+        sudo modprobe ip_gre || true
+        sudo modprobe xfrm_user || true
 
     - name: Run Integration Tests
       run: |
