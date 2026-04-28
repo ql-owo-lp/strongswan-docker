@@ -45,7 +45,9 @@ LOAD_BALANCE=${LOAD_BALANCE:-false}
 INSTANCE_ID="${INSTANCE_ID:-strongswan-local}"
 
 # Sanitize INSTANCE_ID for interface prefix (limit to 10 chars, remove special chars)
-IFACE_PREFIX=$(echo "${INSTANCE_ID}" | sed 's/[^a-zA-Z0-9]//g' | cut -c1-10)
+_clean_id=$(echo "${INSTANCE_ID}" | tr -dc 'a-zA-Z0-9' | cut -c1-10)
+IFACE_PREFIX="${_clean_id:-strongswan}"
+unset _clean_id
 echo "Using Instance ID: $INSTANCE_ID (Prefix: $IFACE_PREFIX)"
 
 get_vti_name() {

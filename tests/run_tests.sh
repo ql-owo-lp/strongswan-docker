@@ -49,6 +49,7 @@ docker run --name ${CONTAINER_NAME} \
   -v "$(pwd)/${IPTABLES_MOCK_LOG}:/tests/iptables_mock.log" \
   -e IPTABLES_CHAIN_PREFIX=${CHAIN_PREFIX} \
   -e IPTABLES_MOCK_LOG="/tests/iptables_mock.log" \
+  -e INSTANCE_ID=strongswan \
   ${IMAGE_NAME}
 
 # 3. Verify iptables and ip commands
@@ -100,29 +101,29 @@ fi
 # --- VTI MODE CHECKS ---
 echo "Verifying VTI setup..."
 # VTI Interface Creation
-if ! grep -q 'ip tunnel add strongswanl_v10 mode vti remote 5.6.7.8 key 10' ${IPTABLES_MOCK_LOG}; then
-  echo "FAIL: 'ip tunnel add strongswanl_v10' command not found!"
+if ! grep -q 'ip tunnel add strongswan_v10 mode vti remote 5.6.7.8 key 10' ${IPTABLES_MOCK_LOG}; then
+  echo "FAIL: 'ip tunnel add strongswan_v10' command not found!"
   exit 1
 fi
-if ! grep -q "ip link set strongswanl_v10 up mtu 1400" ${IPTABLES_MOCK_LOG}; then
-  echo "FAIL: 'ip link set strongswanl_v10' command not found!"
+if ! grep -q "ip link set strongswan_v10 up mtu 1400" ${IPTABLES_MOCK_LOG}; then
+  echo "FAIL: 'ip link set strongswan_v10' command not found!"
   exit 1
 fi
 
 # Routing
-if ! grep -q "ip route add 172.31.0.0/21 dev strongswanl_v10" ${IPTABLES_MOCK_LOG}; then
+if ! grep -q "ip route add 172.31.0.0/21 dev strongswan_v10" ${IPTABLES_MOCK_LOG}; then
   echo "FAIL: 'ip route add 172.31.0.0/21' command not found!"
   exit 1
 fi
 
 # Firewall rules for VTI
 # Allow forwarding over VTI
-if ! grep -q "iptables -A ${CHAIN_FORWARD} -i strongswanl_v10 -j ACCEPT" ${IPTABLES_MOCK_LOG}; then
-  echo "FAIL: Forwarding rule for input strongswanl_v10 not found!"
+if ! grep -q "iptables -A ${CHAIN_FORWARD} -i strongswan_v10 -j ACCEPT" ${IPTABLES_MOCK_LOG}; then
+  echo "FAIL: Forwarding rule for input strongswan_v10 not found!"
   exit 1
 fi
-if ! grep -q "iptables -A ${CHAIN_FORWARD} -o strongswanl_v10 -j ACCEPT" ${IPTABLES_MOCK_LOG}; then
-  echo "FAIL: Forwarding rule for output strongswanl_v10 not found!"
+if ! grep -q "iptables -A ${CHAIN_FORWARD} -o strongswan_v10 -j ACCEPT" ${IPTABLES_MOCK_LOG}; then
+  echo "FAIL: Forwarding rule for output strongswan_v10 not found!"
   exit 1
 fi
 
