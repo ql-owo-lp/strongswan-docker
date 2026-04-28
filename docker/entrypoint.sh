@@ -135,9 +135,14 @@ AWK_SCRIPT='
     in_conn && /^right=/ { split($0, a, "="); right=a[2]; }
     in_conn && /^leftsubnet=/ { split($0, a, "="); left_sub=a[2]; }
     in_conn && /^rightsubnet=/ { split($0, a, "="); right_sub=a[2]; }
+    in_conn && /^leftvti=/ { split($0, a, "="); if (a[2] != "") left_vti=a[2]; }
 
     END { process_conn(); }
 '
+
+if grep -q "leftvti=" /etc/ipsec.conf; then
+    echo "WARNING: 'leftvti' detected in /etc/ipsec.conf. This may conflict with the container's manual VTI management (mark=). Consider removing 'leftvti' if using 'mark'."
+fi
 
 # Read configs from ipsec.conf
 echo "DEBUG: Reading /etc/ipsec.conf:"
@@ -605,6 +610,8 @@ SS_CONSECUTIVE_DOWN_THRESHOLD=${SS_CONSECUTIVE_DOWN_THRESHOLD:-2}
 # --- BACKGROUND RECONCILER ---
 # Periodically verify interfaces, routes, and firewall rules are intact.
 reconcile_loop() {
+    # Disable exit-on-error for the background loop to ensure it stays alive
+    set +e
     echo "Starting Background Reconciler..."
     local check_interval=${HEALTH_CHECK_INTERVAL:-30}
     while true; do
@@ -698,7 +705,7 @@ reconcile_loop() {
                     fi
 
                     echo "RECONCILE: Restarting strongSwan process..."
-                    ipsec restart
+                    ipsec restart || echo "Warning: ipsec restart failed"
 
                     # Reset individual connection counters and consecutive-down counter
                     SS_CONSECUTIVE_DOWN=0
