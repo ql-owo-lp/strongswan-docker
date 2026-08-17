@@ -55,6 +55,32 @@ get_vti_name() {
     echo "${IFACE_PREFIX}_v${mark}"
 }
 
+safe_ip_del() {
+    local iface="$1"
+    if [ -z "$iface" ]; then return 0; fi
+    if ! ip link show "$iface" >/dev/null 2>&1; then
+        return 0
+    fi
+    echo "Deleting interface: $iface"
+    # Timeout after 3s to prevent hangs on kernel unregister_netdevice refcnt locks
+    if ! timeout 3s ip link del "$iface" 2>/dev/null; then
+        echo "Warning: Failed or timed out deleting $iface (possible kernel refcount lock)."
+        return 1
+    fi
+    return 0
+}
+
+check_kernel_health() {
+    if command -v dmesg >/dev/null 2>&1; then
+        local stuck
+        stuck=$(dmesg 2>/dev/null | grep "unregister_netdevice: waiting for" | tail -n 1)
+        if [ -n "$stuck" ]; then
+            echo "WARNING: Kernel netdevice refcount issue detected: $stuck"
+            echo "A host reboot is recommended if network interfaces hang or fail to delete."
+        fi
+    fi
+}
+
 cleanup_xfrm() {
     echo "Cleaning up XFRM state/policies..."
     ip xfrm state flush || echo "Warning: Failed to flush xfrm state"
@@ -68,13 +94,14 @@ cleanup_vtis() {
     ip -o link show | grep "alias managed-by-$INSTANCE_ID" | awk -F': ' '{print $2}' | cut -d@ -f1 | while read intf; do
         if [ -n "$intf" ]; then
             echo "     Deleting owned VTI: $intf"
-            ip link del "$intf" 2>/dev/null || true
+            safe_ip_del "$intf" || true
         fi
     done
 }
 
 if [ "$FLUSH_POLICY_ON_START" == "true" ]; then
     echo "Cleaning up leftovers (FLUSH_POLICY_ON_START=true)..."
+    check_kernel_health
     cleanup_xfrm
     
     echo "  -> Flushing routing table ${TABLE_NUM}..."
@@ -242,45 +269,61 @@ setup_vti() {
     local remote_ip=$3
     local vti_name=$(get_vti_name "$mark")
 
+    # Load kernel module if not already loaded (privileged container)
+    modprobe ip_vti 2>/dev/null || true
+    modprobe ip_tunnel 2>/dev/null || true
+
     # VTI MTU: 1400 is the "Golden Number".
     local vti_mtu=1400
+    local need_create=1
 
-    # Robust Cleanup: Check for collision by Mark/Key (handles renames/stale interfaces)
-    # matching "key <mark>" at end of line or followed by space
-    local existing_vti=$(ip tunnel show | grep -E "key $mark($|[[:space:]])" | cut -d: -f1 | head -n 1)
-    if [ -n "$existing_vti" ]; then
-        echo "Found existing VTI interface $existing_vti with mark $mark. Deleting..."
-        ip link del "$existing_vti" 2>/dev/null || true
-    fi
-
+    # Check if interface already exists
     if ip link show "$vti_name" >/dev/null 2>&1; then
-        echo "VTI interface $vti_name already exists, resetting..."
-        ip link del "$vti_name"
+        local cur_info
+        cur_info=$(ip tunnel show "$vti_name" 2>/dev/null || true)
+        if echo "$cur_info" | grep -q "remote $remote_ip" && echo "$cur_info" | grep -E -q "key $mark($|[[:space:]])"; then
+            echo "VTI interface $vti_name already exists with matching parameters (remote $remote_ip, key $mark). Reusing..."
+            need_create=0
+        else
+            echo "VTI interface $vti_name exists with mismatched parameters, resetting..."
+            safe_ip_del "$vti_name" || true
+        fi
     fi
 
-    echo "Creating VTI Interface: $vti_name (MTU: $vti_mtu, Mark: $mark)"
-    echo "DEBUG: Executing: ip tunnel add \"$vti_name\" mode vti remote \"$remote_ip\" key \"$mark\""
-    
-    # Use specific remote but omit local (allow multiple tunnels to same remote)
-    if ! ip tunnel add "$vti_name" mode vti remote "$remote_ip" key "$mark"; then
-        echo "ERROR: Failed to create VTI interface $vti_name"
-        echo "ARGS: name=$vti_name remote=$remote_ip key=$mark"
-        exit 1
+    if [ "$need_create" -eq 1 ]; then
+        # Check for collision by Mark/Key on a different interface
+        local existing_vti
+        existing_vti=$(ip tunnel show 2>/dev/null | grep -E "key $mark($|[[:space:]])" | cut -d: -f1 | head -n 1)
+        if [ -n "$existing_vti" ] && [ "$existing_vti" != "$vti_name" ]; then
+            echo "Found conflicting VTI interface $existing_vti with mark $mark. Deleting..."
+            safe_ip_del "$existing_vti" || true
+        fi
+
+        echo "Creating VTI Interface: $vti_name (MTU: $vti_mtu, Mark: $mark)"
+        echo "DEBUG: Executing: ip tunnel add \"$vti_name\" mode vti remote \"$remote_ip\" key \"$mark\""
+        
+        # Use specific remote but omit local (allow multiple tunnels to same remote)
+        if ! timeout 5s ip tunnel add "$vti_name" mode vti remote "$remote_ip" key "$mark"; then
+            echo "ERROR: Failed to create VTI interface $vti_name"
+            echo "ARGS: name=$vti_name remote=$remote_ip key=$mark"
+            # Return failure instead of hard exit 1 so other tunnels can proceed
+            return 1
+        fi
     fi
-    ip link set "$vti_name" up mtu "$vti_mtu"
+
+    timeout 3s ip link set "$vti_name" up mtu "$vti_mtu" 2>/dev/null || echo "Warning: Failed to set $vti_name up"
     
     # Tag the interface with an alias for stateful management
-    ip link set "$vti_name" alias "managed-by-$INSTANCE_ID"
+    timeout 3s ip link set "$vti_name" alias "managed-by-$INSTANCE_ID" 2>/dev/null || echo "Warning: Failed to set alias on $vti_name"
 
     # Disable policy lookup on the VTI interface itself
-    # Disable policy lookup on the VTI interface itself
-    sysctl -w "net.ipv4.conf.${vti_name}.disable_policy=1" >/dev/null || echo "Warning: Failed to disable policy on $vti_name"
+    sysctl -w "net.ipv4.conf.${vti_name}.disable_policy=1" >/dev/null 2>&1 || echo "Warning: Failed to disable policy on $vti_name"
 
     # Add routing for remote subnets
     IFS=',' read -ra SUBNETS <<< "$4"
     for subnet in "${SUBNETS[@]}"; do
         echo "  -> Routing $subnet via $vti_name (metric $mark)"
-        ip route add "$subnet" dev "$vti_name" metric "$mark"
+        ip route add "$subnet" dev "$vti_name" metric "$mark" 2>/dev/null || ip route replace "$subnet" dev "$vti_name" metric "$mark" 2>/dev/null || true
     done
 }
 
@@ -374,7 +417,7 @@ apply_firewall() {
             
             if ip link show "$ifname" >/dev/null 2>&1; then
                 echo "Interface $ifname already exists, resetting..."
-                ip link del "$ifname"
+                safe_ip_del "$ifname" || true
             fi
             
             # Build command args
@@ -639,9 +682,9 @@ reconcile_loop() {
             if [ "$mark" != "0" ]; then
                 vti_name=$(get_vti_name "$mark")
                 # Check if interface exists and is tagged correctly
-                if ! ip -o link show "$vti_name" | grep -q "alias managed-by-$INSTANCE_ID"; then
-                    echo "RECONCILE: VTI $vti_name missing or untagged, recreating..."
-                    setup_vti "$mark" "$left" "$right" "$right_sub"
+                if ! timeout 3s ip -o link show "$vti_name" 2>/dev/null | grep -q "alias managed-by-$INSTANCE_ID"; then
+                    echo "RECONCILE: VTI $vti_name missing or untagged, reconciling..."
+                    setup_vti "$mark" "$left" "$right" "$right_sub" || true
                 fi
             fi
         done <<< "$CONFIG_DATA"
